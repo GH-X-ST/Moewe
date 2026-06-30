@@ -1,0 +1,57 @@
+schema_version: 0.1
+project_stage: simulation
+config_id: primitive_library_dense_smoke
+status: smoke_example
+units:
+  length: m
+  angle: rad
+  velocity: m_s
+  time: s
+  specific_energy: J_kg
+frames:
+  world: z_up
+  body: x_forward_y_starboard_z_down
+command_order: [aileron, elevator, rudder]
+grammar:
+  family: bank_pitch_dwell_recovery
+  operating_point:
+    method: deterministic_pseudo_trim
+    airspeed_m_s: [6.5, 7.0]
+    flight_path_angle_rad: [-0.03, 0.0]
+    altitude_m: [0.9, 1.1]
+    command_rad: [0.0, 0.0, 0.0]
+    wind_mode: panel
+  bank_transition:
+    target_bank_rad: [-0.3, -0.15, 0.0, 0.15, 0.3]
+    duration_s: 0.2
+  pitch_pulse:
+    delta_pitch_rad: [-0.08, -0.04, 0.0, 0.04, 0.08]
+    duration_s: 0.2
+  dwell:
+    duration_s: [0.1, 0.2]
+  recovery:
+    mode: nominal
+    duration_s: 0.2
+  controller_types: [pd]
+  candidate_count: 400
+structured_evidence:
+  case_set: library_design
+  design_matrix: config/simulation/structured_library_design_matrix.yaml
+  randomized: false
+  seeds_required: false
+  used_for_library_construction: true
+rollout:
+  dt_s: 0.01
+  max_duration_s: 0.08
+acceptance_thresholds:
+  min_safety_margin_m: -10.0
+  max_angle_of_attack_rad: 10.0
+  max_command_abs_rad: 10.0
+  min_terminal_specific_energy_change_j_kg: -100.0
+  min_terminal_specific_energy_margin_j_kg: null
+outputs:
+  writes_files_by_default: false
+notes:
+  - This expands interface candidates for structured library design cases; it does not run a dense campaign automatically.
+  - Random challenge cases are excluded from primitive-library construction.
+  - Airframe and actuator sensitivity checks are deferred until parameter transforms are explicitly reviewed.

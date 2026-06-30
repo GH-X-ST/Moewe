@@ -1,0 +1,43 @@
+schema_version: 0.1
+project_stage: simulation
+config_id: random_challenge_after_freeze
+status: smoke_example
+case_set: random_challenge_after_freeze
+units:
+  length: m
+  angle: rad
+  velocity: m_s
+  time: s
+frames:
+  world: z_up
+  body: x_forward_y_starboard_z_down
+rules:
+  randomized: true
+  requires_controller_freeze: true
+  disabled_for_library_construction: true
+  used_for_library_construction: false
+  used_for_governor_tuning: false
+seed_policy:
+  seeds_fixed_before_campaign: true
+  base_seed: 91
+case_ids:
+  - challenge_light_random_updraft
+  - challenge_hard_random_updraft
+  - challenge_random_three_source
+  - challenge_random_four_source
+  - challenge_initial_state_random
+  - challenge_limited_plant_random
+randomized_factors:
+  - updraft_centre
+  - updraft_strength
+  - ring_radius
+  - ring_thickness
+  - background_vertical_flow
+  - initial_position
+  - initial_speed
+  - initial_attitude
+outputs:
+  writes_files_by_default: false
+notes:
+  - Random challenge cases are after-freeze evaluation fixtures only.
+  - They must not be used to build the primitive library or tune the governor.

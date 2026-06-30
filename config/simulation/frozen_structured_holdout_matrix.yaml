@@ -1,0 +1,34 @@
+schema_version: 0.1
+project_stage: simulation
+config_id: frozen_structured_holdout_matrix
+status: smoke_example
+case_set: frozen_structured_holdout
+units:
+  length: m
+  angle: rad
+  velocity: m_s
+  time: s
+frames:
+  world: z_up
+  body: x_forward_y_starboard_z_down
+rules:
+  randomized: false
+  used_for_library_construction: false
+  used_for_governor_tuning: false
+  use_only_after_library_and_governor_freeze: true
+case_ids:
+  - holdout_still_air_easy
+  - holdout_shifted_single_fan
+  - holdout_strong_fan_at_gate
+  - holdout_broad_fan_downstream
+  - holdout_two_source_asymmetric
+  - holdout_three_source_structured
+  - holdout_four_source_structured
+  - holdout_tight_gate_strong_lift
+  - holdout_low_energy_launch
+  - holdout_lateral_upset_entry
+outputs:
+  writes_files_by_default: false
+notes:
+  - These structured holdouts evaluate the frozen method only.
+  - They must not be used to alter library construction or governor thresholds after results are visible.

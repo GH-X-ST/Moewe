@@ -1,0 +1,40 @@
+schema_version: 0.1
+project_stage: simulation
+config_id: primitive_validation_smoke
+status: smoke_example
+units:
+  length: m
+  angle: rad
+  velocity: m_s
+  time: s
+  specific_energy: J_kg
+frames:
+  world: z_up
+  body: x_forward_y_starboard_z_down
+command_order: [aileron, elevator, rudder]
+inputs:
+  grammar_config: config/simulation/primitive_grammar_smoke.yaml
+scenario:
+  scenario_id: primitive_validation_smoke
+  seed: 0
+  wind_model: none
+  wind_mode: panel
+  entry_offset_state_order:
+    [x, y, z, roll, pitch, yaw, u, v, w, p, q, r, aileron, elevator, rudder]
+  entry_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  entry_half_width: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+rollout:
+  dt_s: 0.01
+  max_duration_s: 0.2
+  controller_type: pd
+acceptance_thresholds:
+  min_safety_margin_m: 0.0
+  max_angle_of_attack_rad: 0.8
+  max_command_abs_rad: 0.6
+  min_terminal_specific_energy_change_j_kg: -10.0
+  min_terminal_specific_energy_margin_j_kg: null
+outputs:
+  writes_files_by_default: false
+notes:
+  - This is a tiny deterministic validation smoke scenario.
+  - Retention means the smoke thresholds passed; it is not a final viability claim.

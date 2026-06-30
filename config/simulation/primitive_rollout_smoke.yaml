@@ -1,0 +1,50 @@
+schema_version: 0.1
+project_stage: simulation
+config_id: primitive_rollout_smoke
+status: smoke_example
+units:
+  length: m
+  angle: rad
+  velocity: m_s
+  time: s
+frames:
+  world: z_up
+  body: x_forward_y_starboard_z_down
+command_order: [aileron, elevator, rudder]
+rollout:
+  dt_s: 0.01
+  wind_model: none
+  wind_mode: panel
+  max_duration_s: null
+  seed: 0
+  scenario_id: primitive_smoke
+controller:
+  type: pd
+  command_limits_rad:
+    lower: [-0.6, -0.6, -0.6]
+    upper: [0.6, 0.6, 0.6]
+  gains:
+    roll_p: 0.8
+    roll_d: 0.15
+    pitch_p: 0.8
+    pitch_d: 0.18
+    yaw_p: 0.2
+    yaw_d: 0.08
+    speed_p: 0.03
+    altitude_p: 0.0
+    vertical_speed_p: 0.0
+evidence:
+  records:
+    - primitive_id
+    - family
+    - controller_type
+    - rollout_success
+    - min_safety_margin_m
+    - terminal_specific_energy_margin_j_kg
+    - max_angle_of_attack_rad
+    - max_command_abs_rad
+    - gate_miss_distance_m
+    - failure_reason
+notes:
+  - This rollout config is for finite-state smoke tests only.
+  - It is not a benchmark, validation sweep, or flight result.

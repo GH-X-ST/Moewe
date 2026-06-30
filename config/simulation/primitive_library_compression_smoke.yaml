@@ -1,0 +1,50 @@
+schema_version: 0.1
+project_stage: simulation
+config_id: primitive_library_compression_smoke
+status: smoke_example
+units:
+  length: m
+  angle: rad
+  velocity: m_s
+  time: s
+  specific_energy: J_kg
+frames:
+  world: z_up
+  body: x_forward_y_starboard_z_down
+inputs:
+  dense_config: config/simulation/primitive_library_dense_smoke.yaml
+  evidence_case_set: library_design
+compression:
+  method: deterministic_grouped_medoids
+  operates_on: retained_library_design_records
+  medoids_are_existing_primitives: true
+  group_by:
+    - family
+    - controller_type
+    - entry_class
+  tier_budgets_per_group:
+    raw_retained: all
+    heavy: 8
+    balanced: 4
+    light: 2
+    super_light: 1
+    smoke: 1
+  feature_frames:
+    displacement: world_z_up
+    velocity_delta: body
+  feature_scales:
+    displacement_m: 1.0
+    velocity_m_s: 1.0
+    energy_j_kg: 10.0
+    safety_margin_m: 1.0
+    angle_rad: 0.5
+    command_rad: 0.5
+    gate_miss_m: 1.0
+    useful_lift_m_s: 1.0
+outputs:
+  writes_files_by_default: false
+  suggested_filename: primitive_library_tiers.json
+notes:
+  - Compression is a structured evidence selection layer, not a viability proof.
+  - frozen-holdout holdouts and random-challenge random challenges are excluded from compression input.
+  - Raw trajectories remain in memory and are not part of public tier manifests.

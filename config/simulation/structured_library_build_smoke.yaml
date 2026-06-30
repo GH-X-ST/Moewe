@@ -1,0 +1,28 @@
+schema_version: 0.1
+project_stage: returnability
+config_id: structured_library_build_smoke
+status: smoke_example
+case_set: library_design
+source_cases: structured_library_design_matrix
+source_config: config/simulation/structured_library_design_matrix.yaml
+primitive_grammar: config/simulation/primitive_library_dense_smoke.yaml
+rules:
+  deterministic: true
+  random_challenge_allowed: false
+  controller_frozen_required: false
+  used_for_library_construction: true
+  writes_files_by_default: false
+outputs:
+  report_type: structured_library_build_report
+  records:
+    - design_case_id
+    - case_set
+    - primitive_id
+    - family
+    - controller_type
+    - entry_class
+    - exit_class
+    - retained
+notes:
+  - This build uses structured library design cases only.
+  - No result file is written unless an explicit output path is supplied.

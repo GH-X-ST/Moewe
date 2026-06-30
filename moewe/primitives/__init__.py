@@ -1,0 +1,145 @@
+"""Structured manoeuvre primitive grammar and smoke-rollout utilities."""
+
+from .classify import PrimitiveStateClassifier, StateClassLabel, StateClassifierSpec
+from .compress import (
+    CompressedPrimitiveEntry,
+    CompressedPrimitiveLibrary,
+    CompressedPrimitiveTier,
+    CompressionSpec,
+    CompressionTierBudgets,
+    compress_retained_primitives,
+)
+from .evidence import PrimitiveEvidence
+from .features import (
+    FeatureScaleSpec,
+    PrimitiveBehaviourFeature,
+    extract_behaviour_feature,
+    feature_vector,
+)
+from .generate import PrimitiveCandidate, generate_primitives
+from .grammar import (
+    BankTransitionSpec,
+    DwellSpec,
+    OperatingPointSpec,
+    PitchPulseSpec,
+    PrimitiveEntryCondition,
+    PrimitiveGrammarSpec,
+    PrimitiveSafetyLimits,
+    PrimitiveSafetyReport,
+    RecoverySpec,
+)
+from .library import (
+    ExpandedPrimitiveGrammar,
+    RandomChallengeMatrixSpec,
+    StructuredCase,
+    StructuredDesignCase,
+    StructuredDesignMatrixSpec,
+    StructuredHoldoutMatrixSpec,
+    ValidationLadderSpec,
+    build_frozen_structured_holdout_cases,
+    build_random_challenge_cases,
+    build_structured_library_design_cases,
+    build_validation_ladder,
+    dense_smoke_grammar,
+    expand_primitive_grammar,
+)
+from .manifest import PrimitiveValidationManifest
+from .phases import (
+    BankTransitionPhase,
+    DwellPhase,
+    HoldPhase,
+    PhaseSample,
+    PitchPulsePhase,
+    PrimitivePhase,
+    RecoveryPhase,
+)
+from .reference import PrimitiveReference
+from .retrieve import PrimitiveLibrary, PrimitiveLibraryCandidate, PrimitiveLibraryQuery
+from .rollout import (
+    PrimitiveRolloutConfig,
+    PrimitiveRolloutResult,
+    ReferencePDController,
+    build_primitive_controller,
+    rollout_primitive,
+)
+from .runtime import RetrievalTimingCheck, check_retrieval_timing
+from .structured import StructuredLibraryBuildReport, build_structured_primitive_library
+from .sweep import PrimitiveValidationReport, run_validation_sweep
+from .validate import (
+    AcceptanceThresholds,
+    EntryPerturbationSpec,
+    PrimitiveValidationResult,
+    RetentionDecision,
+    ValidationScenario,
+    decide_retention,
+    validate_primitive,
+)
+
+__all__ = [
+    "AcceptanceThresholds",
+    "BankTransitionPhase",
+    "BankTransitionSpec",
+    "CompressedPrimitiveEntry",
+    "CompressedPrimitiveLibrary",
+    "CompressedPrimitiveTier",
+    "CompressionSpec",
+    "CompressionTierBudgets",
+    "DwellPhase",
+    "DwellSpec",
+    "EntryPerturbationSpec",
+    "ExpandedPrimitiveGrammar",
+    "FeatureScaleSpec",
+    "HoldPhase",
+    "OperatingPointSpec",
+    "PhaseSample",
+    "PitchPulsePhase",
+    "PitchPulseSpec",
+    "PrimitiveBehaviourFeature",
+    "PrimitiveCandidate",
+    "PrimitiveEntryCondition",
+    "PrimitiveEvidence",
+    "PrimitiveGrammarSpec",
+    "PrimitiveLibrary",
+    "PrimitiveLibraryCandidate",
+    "PrimitiveLibraryQuery",
+    "PrimitivePhase",
+    "PrimitiveReference",
+    "PrimitiveRolloutConfig",
+    "PrimitiveRolloutResult",
+    "PrimitiveSafetyLimits",
+    "PrimitiveSafetyReport",
+    "PrimitiveStateClassifier",
+    "PrimitiveValidationManifest",
+    "PrimitiveValidationReport",
+    "PrimitiveValidationResult",
+    "RandomChallengeMatrixSpec",
+    "RecoveryPhase",
+    "RecoverySpec",
+    "ReferencePDController",
+    "RetrievalTimingCheck",
+    "RetentionDecision",
+    "StructuredCase",
+    "StructuredDesignCase",
+    "StructuredDesignMatrixSpec",
+    "StructuredHoldoutMatrixSpec",
+    "StructuredLibraryBuildReport",
+    "StateClassLabel",
+    "StateClassifierSpec",
+    "ValidationScenario",
+    "check_retrieval_timing",
+    "build_primitive_controller",
+    "build_frozen_structured_holdout_cases",
+    "build_random_challenge_cases",
+    "build_structured_library_design_cases",
+    "build_structured_primitive_library",
+    "compress_retained_primitives",
+    "decide_retention",
+    "dense_smoke_grammar",
+    "expand_primitive_grammar",
+    "extract_behaviour_feature",
+    "feature_vector",
+    "generate_primitives",
+    "run_validation_sweep",
+    "rollout_primitive",
+    "validate_primitive",
+]

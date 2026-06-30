@@ -1,0 +1,52 @@
+schema_version: 0.1
+project_stage: simulation
+config_id: structured_library_design_matrix
+status: smoke_example
+case_set: library_design
+units:
+  length: m
+  angle: rad
+  velocity: m_s
+  time: s
+frames:
+  world: z_up
+  body: x_forward_y_starboard_z_down
+rules:
+  randomized: false
+  seeds_required: false
+  used_for_library_construction: true
+  used_for_governor_tuning: true
+  final_performance_claim: false
+case_ids:
+  - design_still_air_trim_recovery
+  - design_still_air_gate_alignment
+  - design_lift_before_gate
+  - design_lift_at_gate
+  - design_lift_after_gate
+  - design_lateral_lift
+  - design_strong_lift
+  - design_broad_lift
+  - design_compact_lift
+  - design_two_source_symmetric_lift
+  - design_two_source_asymmetric_lift
+  - design_recovery_only
+case_fields:
+  - case_id
+  - case_set
+  - flow_source_count
+  - updraft_longitudinal_relation
+  - updraft_lateral_relation
+  - updraft_strength_bin
+  - ring_radius_bin
+  - ring_thickness_bin
+  - gate_size_bin
+  - entry_speed_bin
+  - entry_lateral_bin
+  - entry_altitude_bin
+  - entry_attitude_bin
+  - role
+outputs:
+  writes_files_by_default: false
+notes:
+  - These deterministic physical cases build the primitive basis and transition evidence.
+  - Random challenge cases are excluded from this case_set.

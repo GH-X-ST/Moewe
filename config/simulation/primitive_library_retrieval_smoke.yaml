@@ -1,0 +1,40 @@
+schema_version: 0.1
+project_stage: simulation
+config_id: primitive_library_retrieval_smoke
+status: smoke_example
+units:
+  length: m
+  angle: rad
+  velocity: m_s
+  time: s
+frames:
+  world: z_up
+  body: x_forward_y_starboard_z_down
+inputs:
+  compression_config: config/simulation/primitive_library_compression_smoke.yaml
+  evidence_case_set_source: library_design
+runtime_retrieval:
+  default_tier: balanced
+  query_input: FlightState
+  classifier: PrimitiveStateClassifier
+  exact_match_key: entry_class
+  fallback:
+    enabled: true
+    reason_when_used: no_exact_entry_class
+  does_not_perform:
+    - viability_scoring
+    - governor_filtering
+    - final_candidate_selection
+timing_check:
+  repeat: 10
+  reports:
+    - mean_ms
+    - p95_ms
+    - p99_ms
+outputs:
+  writes_files_by_default: false
+  suggested_filename: primitive_retrieval_check.json
+notes:
+  - Retrieval exposes compatible candidate lists for a future governor.
+  - Timing report measures retrieval only, not control execution or online admissibility.
+  - Retrieval does not admit frozen-holdout holdouts or random-challenge random challenge cases into library construction.
