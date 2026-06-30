@@ -1,0 +1,26 @@
+schema_version: 0.1
+project_stage: baselines
+config_id: lqr_local
+status: local_controller_example
+units:
+  angle: rad
+  time: s
+frames:
+  state: canonical_15_state
+  command_order: [aileron, elevator, rudder]
+linearisation:
+  type: finite_difference_continuous
+  discretisation: explicit_euler
+  dt_s: 0.01
+  state_step: 1.0e-5
+  input_step: 1.0e-5
+lqr:
+  active_state_indices: [12, 13, 14]
+  q_diagonal: [1.0, 1.0, 1.0]
+  r_diagonal: [0.1, 0.1, 0.1]
+command_limits_rad:
+  lower: [-0.6, -0.6, -0.6]
+  upper: [0.6, 0.6, 0.6]
+notes:
+  - This initial example uses actuator surface states as a controllable subset.
+  - Broader attitude and trajectory LQR designs require later trim and controllability review.

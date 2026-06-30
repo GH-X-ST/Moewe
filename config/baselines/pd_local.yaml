@@ -1,0 +1,26 @@
+schema_version: 0.1
+project_stage: baselines
+config_id: pd_local
+status: local_controller_example
+units:
+  angle: rad
+  time: s
+frames:
+  state: canonical_15_state
+  command_order: [aileron, elevator, rudder]
+pd:
+  roll_p: 0.8
+  roll_d: 0.15
+  pitch_p: 0.8
+  pitch_d: 0.18
+  yaw_p: 0.2
+  yaw_d: 0.08
+  speed_p: 0.03
+  altitude_p: 0.0
+  vertical_speed_p: 0.0
+command_limits_rad:
+  lower: [-0.6, -0.6, -0.6]
+  upper: [0.6, 0.6, 0.6]
+notes:
+  - This is a transparent local stabiliser for future ablations.
+  - It is not tuned as a final benchmark controller.
