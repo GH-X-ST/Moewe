@@ -1,0 +1,33 @@
+schema_version: 0.1
+project_stage: rollout_campaign
+config_id: selector_rollout_campaign_smoke
+status: smoke_example
+source_decision_campaign_config: config/simulation/selector_decision_campaign_smoke.yaml
+source_governor_config: config/simulation/online_governor_smoke.yaml
+source_ablation_config: config/baselines/governor_ablation_smoke.yaml
+source_returnability_config: config/simulation/returnability_graph_smoke.yaml
+source_library_config: config/simulation/structured_library_build_smoke.yaml
+case_source: structured_library_report
+
+case_limits:
+  design_case_count: 2
+  max_primitives: 6
+  max_cases: 4
+  retained_only: true
+  state_index: 0
+
+campaign:
+  tier: balanced
+  selectors:
+    - governor
+    - unfiltered
+
+rollout:
+  dt_s: 0.01
+  max_duration_s: 0.10
+
+outputs:
+  writes_files_by_default: false
+
+notes:
+  - This is a selector rollout smoke campaign, not a final benchmark campaign.

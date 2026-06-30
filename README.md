@@ -11,7 +11,7 @@ The current codebase contains:
 - `moewe/returnability`: primitive-transition graphs and recoverability class-set reports.
 - `moewe/governor`: deterministic online filtering of retrieved primitives using returnability evidence.
 - `moewe/baselines`: smoke-scale baseline and ablation utilities for comparing governor-filtered primitive selection against unfiltered primitive scoring.
-- `moewe/campaigns`: smoke-scale decision campaign utilities for comparing selector decisions across sampled primitive evidence cases.
+- `moewe/campaigns`: smoke-scale decision and rollout campaign utilities for comparing selector decisions across sampled primitive evidence cases.
 - `config`: small smoke configurations for the implemented modules.
 - `tests`: unit and smoke tests for the implemented behavior.
 
