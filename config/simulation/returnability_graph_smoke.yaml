@@ -1,0 +1,33 @@
+schema_version: 0.1
+project_stage: returnability
+config_id: returnability_graph_smoke
+status: smoke_example
+graph_source: structured_library_build_smoke
+source_config: config/simulation/structured_library_build_smoke.yaml
+rules:
+  case_set: library_design
+  random_challenge_allowed: false
+  online_governor_implemented: false
+class_sets:
+  - safe
+  - recoverable
+  - forbidden
+  - terminal_success
+  - dead_end
+  - entry_supported
+  - exit_observed
+transition_fields:
+  - primitive_id
+  - design_case_id
+  - entry_class
+  - exit_class
+  - retained
+  - min_safety_margin_m
+  - terminal_specific_energy_change_j_kg
+  - max_angle_of_attack_rad
+  - max_command_abs_rad
+outputs:
+  writes_files_by_default: false
+notes:
+  - The graph is an inspectable method substrate, not a formal viability proof.
+  - A future online governor should consume this graph instead of re-deriving recoverability in an opaque scorer.

@@ -1,0 +1,21 @@
+schema_version: 0.1
+project_stage: returnability
+config_id: returnability_report_smoke
+status: smoke_example
+report_source: returnability_graph_smoke
+source_config: config/simulation/returnability_graph_smoke.yaml
+records:
+  - transition_count
+  - primitive_count
+  - recoverable_class_count
+  - dead_end_class_count
+  - forbidden_class_count
+  - terminal_success_class_count
+  - design_case_coverage
+  - classes_without_outgoing_transitions
+  - classes_without_recovery_successors
+outputs:
+  writes_files_by_default: false
+notes:
+  - The report serialises transition summaries only, not raw trajectories.
+  - Compression traces may map runtime tiers back to original primitive transition evidence.
