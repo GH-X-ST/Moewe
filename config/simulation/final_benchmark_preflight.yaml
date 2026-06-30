@@ -1,0 +1,34 @@
+schema_version: 0.1
+project_stage: final_benchmark_preflight
+config_id: final_benchmark_preflight
+status: smoke_example
+source_random_challenge_config: config/simulation/random_updraft_challenge_campaign_smoke.yaml
+
+rules:
+  runs_full_simulation: false
+  writes_files_by_default: false
+  used_for_library_construction: false
+  used_for_governor_tuning: false
+
+benchmark_plan:
+  tier: balanced
+  methods:
+    - governor
+    - unfiltered
+    - reference_tracking_pd
+  case_families:
+    - weak_random_single_source
+    - hard_random_single_source
+    - random_two_source
+    - random_four_source
+  full_case_count: 120
+
+preflight:
+  case_count: 4
+
+outputs:
+  writes_files_by_default: false
+
+notes:
+  - This preflight validates the final benchmark plan and schema only.
+  - It intentionally stops before the full simulation run.

@@ -12,10 +12,11 @@ The current codebase contains:
 - `moewe/governor`: deterministic online filtering of retrieved primitives using returnability evidence.
 - `moewe/baselines`: smoke-scale baseline and ablation utilities for unfiltered primitive scoring, governor ablations, and reference tracking comparisons.
 - `moewe/campaigns`: smoke-scale decision, rollout, and random updraft challenge campaign utilities for comparing selector and baseline behavior.
+- `moewe/benchmarks`: final benchmark preflight and schema utilities without generated benchmark results.
 - `config`: small smoke configurations for the implemented modules.
 - `tests`: unit and smoke tests for the implemented behavior.
 
-This repository does not contain experiment datasets, paper figures, videos, large generated results, or hardware logs.
+This repository does not contain experiment datasets, generated benchmark outputs, paper figures, videos, large generated results, or hardware logs.
 
 ## Test
 

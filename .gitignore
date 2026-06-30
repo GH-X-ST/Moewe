@@ -34,7 +34,7 @@ tokens.*
 *.pem
 *.p12
 
-# Local notes and private operations
+# Local notes and scratch work
 _notes/
 _scratch/
 _tmp/
@@ -42,8 +42,6 @@ local/
 scratch/
 private/
 work/
-ops/
-Moewe_ops/
 
 # Generated outputs and large artifacts
 logs/
