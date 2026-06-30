@@ -11,7 +11,7 @@ The current codebase contains:
 - `moewe/returnability`: primitive-transition graphs and recoverability class-set reports.
 - `moewe/governor`: deterministic online filtering of retrieved primitives using returnability evidence.
 - `moewe/baselines`: smoke-scale baseline and ablation utilities for unfiltered primitive scoring, governor ablations, and reference tracking comparisons.
-- `moewe/campaigns`: smoke-scale decision and rollout campaign utilities for comparing selector decisions across sampled primitive evidence cases.
+- `moewe/campaigns`: smoke-scale decision, rollout, and random updraft challenge campaign utilities for comparing selector and baseline behavior.
 - `config`: small smoke configurations for the implemented modules.
 - `tests`: unit and smoke tests for the implemented behavior.
 
@@ -25,7 +25,7 @@ python -m pytest
 
 ## Scope
 
-The repository is an early research implementation. The online governor is a conservative smoke-scale decision layer over retrieved primitives and returnability evidence; it is not a formal viability proof. The repository does not yet provide a benchmark campaign, real-flight dataset, firmware package, or paper artifact.
+The repository is an early research implementation. The online governor is a conservative smoke-scale decision layer over retrieved primitives and returnability evidence; it is not a formal viability proof. The repository does not yet provide a final benchmark campaign, real-flight dataset, firmware package, or paper artifact.
 
 ## License
 

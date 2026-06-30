@@ -1,0 +1,36 @@
+schema_version: 0.1
+project_stage: random_challenge_campaign
+config_id: random_updraft_challenge_campaign_smoke
+status: smoke_example
+source_random_challenge_config: config/simulation/random_challenge_after_freeze.yaml
+source_selector_rollout_config: config/simulation/selector_rollout_campaign_smoke.yaml
+source_reference_tracking_config: config/baselines/reference_tracking_smoke.yaml
+source_governor_config: config/simulation/online_governor_smoke.yaml
+source_ablation_config: config/baselines/governor_ablation_smoke.yaml
+case_set: random_challenge_after_freeze
+
+rules:
+  requires_controller_freeze: true
+  used_for_library_construction: false
+  used_for_governor_tuning: false
+  writes_files_by_default: false
+
+campaign:
+  tier: balanced
+  base_seed: 91
+  case_count: 4
+  selectors:
+    - governor
+    - unfiltered
+    - reference_tracking_pd
+
+rollout:
+  dt_s: 0.01
+  max_duration_s: 0.10
+  reference_horizon_s: 0.30
+
+outputs:
+  writes_files_by_default: false
+
+notes:
+  - This is an after-freeze random updraft smoke challenge, not a final benchmark campaign.
