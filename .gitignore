@@ -1,0 +1,73 @@
+# Operating systems
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environment and secrets
+.env
+.env.*
+*.env
+*.secret
+*.secrets
+secrets.*
+credentials.*
+tokens.*
+*.key
+*.pem
+*.p12
+
+# Local notes and private operations
+_notes/
+_scratch/
+_tmp/
+local/
+scratch/
+private/
+work/
+ops/
+Moewe_ops/
+
+# Generated outputs and large artifacts
+logs/
+*.log
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+*.h5
+*.hdf5
+*.mat
+*.npy
+*.npz
+*.parquet
+*.feather
+*.bag
+*.db
+*.sqlite
+
+# Build products
+build/
+dist/
