@@ -1,0 +1,36 @@
+governor:
+  tier: balanced
+  allow_retrieval_fallback: false
+  require_safe_entry: true
+  require_recoverable_entry: true
+  require_recoverable_exit: true
+  reject_forbidden_exit: true
+  min_safety_margin_m: -10.0
+  min_terminal_specific_energy_change_j_kg: -100.0
+  prefer_terminal_success: true
+
+inputs:
+  returnability_graph_config: config/simulation/returnability_graph_smoke.yaml
+  primitive_library_retrieval_config: config/simulation/primitive_library_retrieval_smoke.yaml
+  consumes_returnability_graph: true
+  rederive_recoverability_with_opaque_scorer: false
+
+primitive_library:
+  design_case_count: 2
+  max_primitives: 6
+  compression_tier_budgets:
+    heavy: 3
+    balanced: 2
+    light: 1
+    super_light: 1
+    smoke: 1
+
+runtime_check:
+  tier: balanced
+  repeat: 3
+
+outputs:
+  writes_files_by_default: false
+
+notes:
+  scope: "Inspectable smoke-scale governor substrate; not a formal proof of viability."

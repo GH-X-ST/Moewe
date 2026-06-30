@@ -9,6 +9,7 @@ The current codebase contains:
 - `moewe/control`: pseudo-trim, finite-difference linearisation, local controllers, and closed-loop rollout utilities.
 - `moewe/primitives`: structured primitive generation, rollout validation, compression, and runtime retrieval.
 - `moewe/returnability`: primitive-transition graphs and recoverability class-set reports.
+- `moewe/governor`: deterministic online filtering of retrieved primitives using returnability evidence.
 - `config`: small smoke configurations for the implemented modules.
 - `tests`: unit and smoke tests for the implemented behavior.
 
@@ -22,7 +23,7 @@ python -m pytest
 
 ## Scope
 
-The repository is an early research implementation. It does not yet provide a final online viability governor, benchmark campaign, real-flight dataset, firmware package, or paper artifact.
+The repository is an early research implementation. The online governor is a conservative smoke-scale decision layer over retrieved primitives and returnability evidence; it is not a formal viability proof. The repository does not yet provide a benchmark campaign, real-flight dataset, firmware package, or paper artifact.
 
 ## License
 
