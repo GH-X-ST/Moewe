@@ -1,0 +1,29 @@
+schema_version: 0.1
+project_stage: simulation
+status: initial simulation prior
+units:
+  length: m
+  mass: kg
+  angle: rad
+  time: s
+frames:
+  world: z_up
+  body: x_forward_y_starboard_z_down
+random_seed: null
+model:
+  namespace: moewe.sim.glider_model.nominal_glider
+  evidence_status: engineering_prior_not_final_validation
+  mass_kg: 0.42
+  inertia_diagonal_kg_m2: [0.0022, 0.0140, 0.0155]
+  reference_area_m2: 0.1216
+  reference_span_m: 0.76
+  reference_chord_m: 0.16
+  fuselage_drag_area_m2: 0.006
+  empirical_correction:
+    enabled_default: true
+    coefficient_limit: 0.35
+    claim_boundary: bounded_lateral_stability_prior
+  actuator_surface_order: [aileron, elevator, rudder]
+notes:
+  - This file records the initial nominal prior used by the simulator tests.
+  - Values are not final flight-validation evidence.
