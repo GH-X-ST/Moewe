@@ -1,0 +1,40 @@
+schema_version: 0.1
+project_stage: baselines
+config_id: reference_tracking_smoke
+status: smoke_example
+source_scenario_config: config/scenarios/gate_traversal_still_air.yaml
+
+rules:
+  uses_primitive_library: false
+  uses_returnability_graph: false
+  uses_online_governor: false
+  writes_files_by_default: false
+
+controller:
+  type: reference_tracking_pd
+  dt_s: 0.01
+  horizon_s: 0.30
+  target_speed_m_s: 7.0
+  heading_to_roll_gain: 0.6
+  altitude_to_pitch_gain: 0.25
+  max_reference_roll_rad: 0.45
+  max_reference_pitch_rad: 0.25
+  command_limits:
+    lower_rad: [-0.6, -0.6, -0.6]
+    upper_rad: [0.6, 0.6, 0.6]
+
+outputs:
+  records:
+    - baseline_name
+    - target_position_w_m
+    - gate_success
+    - gate_crossed
+    - gate_miss_distance_m
+    - min_safety_margin_m
+    - terminal_specific_energy_margin_j_kg
+    - max_angle_of_attack_rad
+  writes_files_by_default: false
+
+notes:
+  - This is a smoke-scale reference tracking baseline for later selector comparison.
+  - It is not a final autopilot implementation.

@@ -10,12 +10,12 @@ The current codebase contains:
 - `moewe/primitives`: structured primitive generation, rollout validation, compression, and runtime retrieval.
 - `moewe/returnability`: primitive-transition graphs and recoverability class-set reports.
 - `moewe/governor`: deterministic online filtering of retrieved primitives using returnability evidence.
-- `moewe/baselines`: smoke-scale baseline and ablation utilities for comparing governor-filtered primitive selection against unfiltered primitive scoring.
+- `moewe/baselines`: smoke-scale baseline and ablation utilities for unfiltered primitive scoring, governor ablations, and reference tracking comparisons.
 - `moewe/campaigns`: smoke-scale decision and rollout campaign utilities for comparing selector decisions across sampled primitive evidence cases.
 - `config`: small smoke configurations for the implemented modules.
 - `tests`: unit and smoke tests for the implemented behavior.
 
-This repository does not contain experiment datasets, paper figures, videos, large generated results, hardware logs, or private planning notes.
+This repository does not contain experiment datasets, paper figures, videos, large generated results, or hardware logs.
 
 ## Test
 
