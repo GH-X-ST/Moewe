@@ -1,0 +1,45 @@
+schema_version: 0.1
+project_stage: scenarios
+task_id: gate_traversal_still_air
+status: initial_scenario_example
+units:
+  length: m
+  angle: rad
+  velocity: m_s
+  time: s
+frames:
+  world: z_up
+  body: x_forward_y_starboard_z_down
+task:
+  type: gate_traversal
+  flight_volume:
+    x_min_m: -1.0
+    x_max_m: 6.0
+    y_min_m: -1.5
+    y_max_m: 1.5
+    z_min_m: 0.2
+    z_max_m: 3.0
+  gate:
+    centre_w_m: [4.0, 0.0, 1.0]
+    normal_w: [1.0, 0.0, 0.0]
+    width_m: 0.9
+    height_m: 0.6
+  timeout_s: 2.0
+  angle_of_attack_limit_rad: 0.6
+  required_terminal_specific_energy_j_kg: 0.0
+initial_state:
+  sampler: fixed
+  state_order: [x, y, z, phi, theta, psi, u, v, w, p, q, r, delta_a, delta_e, delta_r]
+  vector: [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+wind:
+  model: none
+  wind_mode: panel
+metrics:
+  - success
+  - gate_crossed
+  - gate_miss_distance_m
+  - min_safety_margin_m
+  - flight_time_s
+  - terminal_specific_energy_margin_j_kg
+  - max_angle_of_attack_rad
+  - failure_reason
