@@ -1,0 +1,26 @@
+schema_version: 0.1
+project_stage: baselines
+config_id: governor_ablation_smoke
+status: smoke_example
+source_governor_config: config/simulation/online_governor_smoke.yaml
+source_retrieval_config: config/simulation/primitive_library_retrieval_smoke.yaml
+
+selector:
+  allow_retrieval_fallback: true
+  scoring:
+    energy_weight: 1.0
+    safety_weight: 0.25
+    lift_weight: 0.25
+    gate_miss_weight: 0.25
+    missing_feature_value: 0.0
+
+rules:
+  no_returnability_filtering: true
+  no_forbidden_class_filtering: true
+  no_recoverability_filtering: true
+
+outputs:
+  writes_files_by_default: false
+
+notes:
+  - This is a baseline ablation substrate, not a final benchmark result.
