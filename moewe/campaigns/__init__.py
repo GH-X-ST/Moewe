@@ -1,5 +1,6 @@
 """Smoke-scale decision campaign utilities."""
 
+from .decision_diagnostics import DecisionDiagnosticRecord, build_decision_diagnostic_record
 from .random_updraft_challenge import (
     RandomUpdraftChallengeCase,
     RandomUpdraftChallengeConfig,
@@ -24,6 +25,7 @@ from .selector_rollout_campaign import (
 )
 
 __all__ = [
+    "DecisionDiagnosticRecord",
     "RandomUpdraftChallengeCase",
     "RandomUpdraftChallengeConfig",
     "RandomUpdraftChallengeMethodRecord",
@@ -36,6 +38,7 @@ __all__ = [
     "SelectorRolloutCampaignReport",
     "SelectorRolloutRecord",
     "build_random_updraft_challenge_cases",
+    "build_decision_diagnostic_record",
     "build_selector_campaign_cases_from_structured_report",
     "run_random_updraft_challenge_campaign",
     "run_selector_decision_campaign",

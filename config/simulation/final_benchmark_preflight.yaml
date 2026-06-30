@@ -14,8 +14,15 @@ benchmark_plan:
   tier: balanced
   methods:
     - governor
-    - unfiltered
-    - reference_tracking_pd
+    - open_loop_diagnostic
+    - ungoverned_primitive_selector
+    - filter_only_no_degradation
+    - no_returnability_selector
+    - trajectory_tracking_lqr_tvlqr
+    - energy_lateral_guidance
+    - wind_aware_guidance
+    - inner_loop_substitution
+    - lift_evidence_removed
   case_families:
     - weak_random_single_source
     - hard_random_single_source

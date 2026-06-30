@@ -20,6 +20,126 @@ def _stable_hash(payload: dict[str, object]) -> str:
     return sha256(encoded).hexdigest()
 
 
+def _entry_trim_mode(airspeed_m_s: float, gamma_rad: float, altitude_m: float) -> str:
+    if airspeed_m_s < 6.8 or altitude_m < 0.9:
+        return "low_energy_glide"
+    if gamma_rad < -0.02:
+        return "descending_glide"
+    return "stable_glide"
+
+
+def _bank_label(bank_rad: float) -> str:
+    if abs(bank_rad) < 1e-12:
+        return "wings_level"
+    side = "left" if bank_rad < 0.0 else "right"
+    magnitude = "mild" if abs(bank_rad) <= 0.2 else "energy_retaining"
+    return f"{magnitude}_{side}"
+
+
+def _pitch_label(delta_pitch_rad: float) -> str:
+    if abs(delta_pitch_rad) < 1e-12:
+        return "neutral"
+    if delta_pitch_rad > 0.0:
+        return "altitude_recovery" if delta_pitch_rad <= 0.05 else "terminal_flare_preparation"
+    return "energy_conserving" if abs(delta_pitch_rad) <= 0.05 else "updraft_entry"
+
+
+def _dwell_label(duration_s: float) -> str:
+    if duration_s <= 0.0:
+        return "no_dwell"
+    if duration_s <= 0.1:
+        return "short"
+    if duration_s <= 0.2:
+        return "medium"
+    return "long"
+
+
+def _aggressiveness_level(bank_rad: float, pitch_delta_rad: float, dwell_s: float) -> int:
+    score = abs(bank_rad) / 0.2 + abs(pitch_delta_rad) / 0.05 + max(0.0, dwell_s - 0.1) / 0.1
+    if score < 0.5:
+        return 0
+    if score < 2.0:
+        return 1
+    return 2
+
+
+def _task_intent_label(bank_rad: float, pitch_delta_rad: float, dwell_s: float) -> str:
+    if pitch_delta_rad > 0.0:
+        return "safe_exit"
+    if pitch_delta_rad < 0.0 and dwell_s >= 0.2:
+        return "lift_dwell"
+    if abs(bank_rad) > 1e-12:
+        return "gate_center"
+    return "lift_entry"
+
+
+def _candidate_sort_key(candidate: "PrimitiveCandidate") -> tuple[int, str, str]:
+    return (
+        int(candidate.metadata.get("aggressiveness_level", 0)),
+        str(candidate.metadata.get("task_intent_label", "")),
+        candidate.primitive_id,
+    )
+
+
+def _linked_metadata(
+    candidate: "PrimitiveCandidate",
+    candidates: tuple["PrimitiveCandidate", ...],
+) -> dict[str, object]:
+    metadata = dict(candidate.metadata)
+    aggressiveness = int(metadata.get("aggressiveness_level", 0))
+    task_intent = str(metadata.get("task_intent_label", ""))
+    same_family = tuple(item for item in candidates if item.family == candidate.family and item.primitive_id != candidate.primitive_id)
+    weaker_same_task = tuple(
+        item
+        for item in same_family
+        if int(item.metadata.get("aggressiveness_level", 0)) < aggressiveness
+        and str(item.metadata.get("task_intent_label", "")) == task_intent
+    )
+    weaker_same_family = tuple(
+        item
+        for item in same_family
+        if int(item.metadata.get("aggressiveness_level", 0)) < aggressiveness
+    )
+    safe_exit = tuple(
+        item
+        for item in same_family
+        if str(item.metadata.get("task_intent_label", "")) == "safe_exit"
+    )
+    metadata["same_family_degrade_id"] = _first_id(weaker_same_task or weaker_same_family)
+    metadata["safer_task_preserving_degrade_id"] = _first_id(weaker_same_task or safe_exit or weaker_same_family)
+    metadata["recovery_degrade_id"] = _first_id(safe_exit)
+    return metadata
+
+
+def _first_id(candidates: tuple["PrimitiveCandidate", ...]) -> str | None:
+    if not candidates:
+        return None
+    return min(candidates, key=_candidate_sort_key).primitive_id
+
+
+def _with_degradation_links(candidates: list["PrimitiveCandidate"]) -> list["PrimitiveCandidate"]:
+    candidate_tuple = tuple(candidates)
+    linked: list[PrimitiveCandidate] = []
+    for candidate in candidate_tuple:
+        linked.append(
+            PrimitiveCandidate(
+                primitive_id=candidate.primitive_id,
+                family=candidate.family,
+                phases=candidate.phases,
+                reference=PrimitiveReference(
+                    phases=candidate.reference.phases,
+                    metadata=_linked_metadata(candidate, candidate_tuple),
+                ),
+                entry_condition=candidate.entry_condition,
+                safety_limits=candidate.safety_limits,
+                controller_type=candidate.controller_type,
+                metadata=_linked_metadata(candidate, candidate_tuple),
+                generation_hash=candidate.generation_hash,
+            )
+        )
+    return linked
+
+
 @dataclass(frozen=True)
 class PrimitiveCandidate:
     """Inspectable structured primitive record."""
@@ -136,6 +256,17 @@ def generate_primitives(
             phases: tuple[PrimitivePhase, ...] = (hold, bank, pitch, dwell, recovery)
             metadata = {
                 "grammar_factors": factors,
+                "family": grammar.family,
+                "aggressiveness_level": _aggressiveness_level(float(bank_rad), float(pitch_delta_rad), float(dwell_s)),
+                "entry_trim_mode": _entry_trim_mode(float(airspeed), float(gamma), float(altitude)),
+                "bank_transition_label": _bank_label(float(bank_rad)),
+                "pitch_pulse_label": _pitch_label(float(pitch_delta_rad)),
+                "dwell_label": _dwell_label(float(dwell_s)),
+                "recovery_label": grammar.recovery.mode,
+                "task_intent_label": _task_intent_label(float(bank_rad), float(pitch_delta_rad), float(dwell_s)),
+                "same_family_degrade_id": None,
+                "safer_task_preserving_degrade_id": None,
+                "recovery_degrade_id": None,
                 "trim_method": trim.method,
                 "trim_converged": trim.converged,
                 "trim_residual_norm": trim.residual.residual_norm,
@@ -155,4 +286,4 @@ def generate_primitives(
                     generation_hash=generation_hash,
                 )
             )
-    return primitives
+    return _with_degradation_links(primitives)

@@ -9,7 +9,14 @@ from .compress import (
     CompressionTierBudgets,
     compress_retained_primitives,
 )
-from .evidence import PrimitiveEvidence
+from .evidence import (
+    PrimitiveEvidence,
+    PrimitiveEvidenceRecord,
+    primitive_evidence_record_from_candidate,
+    primitive_evidence_record_from_primitive,
+    primitive_evidence_record_from_transition,
+    primitive_evidence_record_from_transitions,
+)
 from .features import (
     FeatureScaleSpec,
     PrimitiveBehaviourFeature,
@@ -98,6 +105,7 @@ __all__ = [
     "PrimitiveCandidate",
     "PrimitiveEntryCondition",
     "PrimitiveEvidence",
+    "PrimitiveEvidenceRecord",
     "PrimitiveGrammarSpec",
     "PrimitiveLibrary",
     "PrimitiveLibraryCandidate",
@@ -142,4 +150,8 @@ __all__ = [
     "run_validation_sweep",
     "rollout_primitive",
     "validate_primitive",
+    "primitive_evidence_record_from_candidate",
+    "primitive_evidence_record_from_primitive",
+    "primitive_evidence_record_from_transition",
+    "primitive_evidence_record_from_transitions",
 ]

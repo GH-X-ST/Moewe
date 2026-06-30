@@ -45,6 +45,31 @@ def test_generated_primitive_records_are_inspectable_without_rollout() -> None:
     assert primitive.metadata["command_order"] == "[aileron, elevator, rudder]"
 
 
+def test_generated_primitive_metadata_contains_degradation_links() -> None:
+    primitives = generate_primitives(PrimitiveGrammarSpec.smoke())
+    by_id = {primitive.primitive_id: primitive for primitive in primitives}
+
+    assert all("aggressiveness_level" in primitive.metadata for primitive in primitives)
+    assert all("entry_trim_mode" in primitive.metadata for primitive in primitives)
+    assert all("bank_transition_label" in primitive.metadata for primitive in primitives)
+    assert all("pitch_pulse_label" in primitive.metadata for primitive in primitives)
+    assert all("dwell_label" in primitive.metadata for primitive in primitives)
+    assert all("recovery_label" in primitive.metadata for primitive in primitives)
+    assert all("task_intent_label" in primitive.metadata for primitive in primitives)
+
+    linked = [primitive for primitive in primitives if primitive.metadata["same_family_degrade_id"] is not None]
+    assert linked
+    for primitive in linked:
+        degrade_id = primitive.metadata["same_family_degrade_id"]
+        assert degrade_id in by_id
+        assert by_id[degrade_id].family == primitive.family
+        assert by_id[degrade_id].metadata["aggressiveness_level"] < primitive.metadata["aggressiveness_level"]
+
+    recovery_linked = [primitive for primitive in primitives if primitive.metadata["recovery_degrade_id"] is not None]
+    assert recovery_linked
+    assert all(by_id[primitive.metadata["recovery_degrade_id"]].metadata["task_intent_label"] == "safe_exit" for primitive in recovery_linked)
+
+
 def test_entry_condition_accepts_nominal_and_rejects_impossible_states() -> None:
     primitive = generate_primitives(PrimitiveGrammarSpec.smoke())[0]
     nominal = primitive.reference.state_at(0.0)

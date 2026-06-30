@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from moewe.baselines import UnfilteredPrimitiveSelector
+from moewe.baselines import BASELINE_METHOD_NAMES, UnfilteredPrimitiveSelector
 from moewe.benchmarks import FinalBenchmarkConfig, run_final_benchmark_preflight
 from moewe.governor import OnlineGovernor
 from moewe.primitives import (
@@ -52,9 +52,10 @@ def test_final_benchmark_preflight_smoke_builds_deterministic_report() -> None:
     assert first["full_simulation_executed"] is False
     assert first["writes_files_by_default"] is False
     assert first["preflight_case_count"] == 4
-    assert first["preflight_record_count"] == 12
-    assert first["expected_full_record_count"] == 360
-    assert set(first["method_names"]) == {"governor", "unfiltered", "reference_tracking_pd"}
+    expected_method_names = {"governor", *BASELINE_METHOD_NAMES}
+    assert first["preflight_record_count"] == 4 * len(expected_method_names)
+    assert first["expected_full_record_count"] == 120 * len(expected_method_names)
+    assert set(first["method_names"]) == expected_method_names
     assert "rollout_success" in first["schema_fields"]
     json.dumps(first, sort_keys=True)
     assert not Path("results").exists()

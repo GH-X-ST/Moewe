@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from pathlib import Path
 
-from moewe.baselines import UnfilteredPrimitiveSelector
+from moewe.baselines import BASELINE_COMMON_SCHEMA_FIELDS, BASELINE_METHOD_NAMES, UnfilteredPrimitiveSelector
 from moewe.campaigns import (
     RandomUpdraftChallengeConfig,
     RandomUpdraftChallengeReport,
@@ -15,25 +16,14 @@ from moewe.campaigns import (
 from moewe.governor import OnlineGovernor
 from moewe.primitives import PrimitiveLibrary
 
-BENCHMARK_METHODS = ("governor", "unfiltered", "reference_tracking_pd")
+BENCHMARK_METHODS = ("governor", *BASELINE_METHOD_NAMES)
 BENCHMARK_CASE_FAMILIES = (
     "weak_random_single_source",
     "hard_random_single_source",
     "random_two_source",
     "random_four_source",
 )
-BENCHMARK_SCHEMA_FIELDS = (
-    "rollout_success",
-    "gate_crossed",
-    "gate_miss_distance_m",
-    "min_safety_margin_m",
-    "terminal_specific_energy_margin_j_kg",
-    "terminal_specific_energy_change_j_kg",
-    "max_angle_of_attack_rad",
-    "max_command_abs_rad",
-    "failure_reason",
-    "fallback_used",
-)
+BENCHMARK_SCHEMA_FIELDS = BASELINE_COMMON_SCHEMA_FIELDS
 
 
 @dataclass(frozen=True)
@@ -47,7 +37,7 @@ class BenchmarkMethodSpec:
             raise ValueError(f"Unknown benchmark method: {self.name}")
 
     def to_record(self) -> dict[str, object]:
-        return {"name": self.name}
+        return {"method_name": self.name}
 
 
 @dataclass(frozen=True)
@@ -286,6 +276,35 @@ def run_final_benchmark_preflight(
     )
 
 
+def require_full_benchmark_guards(
+    *,
+    controller_frozen: bool,
+    write_results: bool,
+    output_dir: str | Path | None,
+    public_repo_root: str | Path | None = None,
+) -> dict[str, object]:
+    """Validate explicit full-benchmark guards without running the campaign."""
+
+    if not controller_frozen:
+        raise ValueError("Full benchmark execution requires controller_frozen=True.")
+    if not write_results:
+        raise ValueError("Full benchmark execution requires write_results=True.")
+    if output_dir is None:
+        raise ValueError("Full benchmark execution requires an explicit output_dir.")
+    output_path = Path(output_dir).resolve()
+    if public_repo_root is not None:
+        repo_root = Path(public_repo_root).resolve()
+        if output_path == repo_root or repo_root in output_path.parents:
+            raise ValueError("Full benchmark output_dir must be outside the public repository.")
+    return {
+        "controller_frozen": True,
+        "write_results": True,
+        "output_dir": str(output_path),
+        "runs_full_simulation": False,
+        "guard_only": True,
+    }
+
+
 def _preflight_cases(config: FinalBenchmarkConfig) -> tuple[object, ...]:
     generated_count = len(BENCHMARK_CASE_FAMILIES) * int(config.preflight_case_count)
     random_config = RandomUpdraftChallengeConfig(
@@ -320,5 +339,6 @@ __all__ = [
     "FinalBenchmarkPlan",
     "FinalBenchmarkPreflightReport",
     "build_final_benchmark_plan",
+    "require_full_benchmark_guards",
     "run_final_benchmark_preflight",
 ]

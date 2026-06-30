@@ -19,6 +19,8 @@ campaign:
   tier: balanced
   base_seed: 91
   case_count: 4
+  controller_frozen: true
+  runs_full_simulation: false
   selectors:
     - governor
     - unfiltered

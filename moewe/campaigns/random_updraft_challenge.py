@@ -10,9 +10,13 @@ from numbers import Real
 import numpy as np
 
 from moewe.baselines import (
+    BASELINE_ALIASES,
+    BASELINE_METHOD_NAMES,
     ReferenceTrackingConfig,
     UnfilteredPrimitiveSelector,
     UnfilteredSelectionDecision,
+    baseline_spec,
+    instantiate_baseline,
     run_reference_tracking_rollout,
 )
 from moewe.governor import GovernorDecision, OnlineGovernor
@@ -24,13 +28,34 @@ from moewe.tasks import FlightVolume, GatePlane, GateTraversalTask, specific_ene
 SELECTOR_GOVERNOR = "governor"
 SELECTOR_UNFILTERED = "unfiltered"
 SELECTOR_REFERENCE_TRACKING = "reference_tracking_pd"
-SUPPORTED_SELECTORS = frozenset({SELECTOR_GOVERNOR, SELECTOR_UNFILTERED, SELECTOR_REFERENCE_TRACKING})
+SELECTOR_UNGOVERNED_PRIMITIVE = "ungoverned_primitive_selector"
+SELECTOR_FILTER_ONLY = "filter_only_no_degradation"
+SELECTOR_NO_RETURNABILITY = "no_returnability_selector"
+SELECTOR_TRAJECTORY_TRACKING = "trajectory_tracking_lqr_tvlqr"
+SELECTOR_LIFT_EVIDENCE_REMOVED = "lift_evidence_removed"
+SUPPORTED_SELECTORS = frozenset(
+    {
+        SELECTOR_GOVERNOR,
+        SELECTOR_UNFILTERED,
+        SELECTOR_REFERENCE_TRACKING,
+        *BASELINE_METHOD_NAMES,
+        *BASELINE_ALIASES,
+    }
+)
 RANDOM_CHALLENGE_CASE_SET = "random_challenge_after_freeze"
 ENVIRONMENT_FAMILIES = (
     "weak_random_single_source",
     "hard_random_single_source",
     "random_two_source",
     "random_four_source",
+)
+_SCAFFOLD_METHODS = frozenset(
+    {
+        "open_loop_diagnostic",
+        "energy_lateral_guidance",
+        "wind_aware_guidance",
+        "inner_loop_substitution",
+    }
 )
 
 
@@ -47,6 +72,8 @@ class RandomUpdraftChallengeConfig:
     reference_horizon_s: float = 0.30
     wind_mode: str = "panel"
     case_set: str = RANDOM_CHALLENGE_CASE_SET
+    controller_frozen: bool = True
+    runs_full_simulation: bool = False
 
     def __post_init__(self) -> None:
         if int(self.case_count) <= 0:
@@ -71,6 +98,10 @@ class RandomUpdraftChallengeConfig:
             raise ValueError("wind_mode must be 'cg' or 'panel'.")
         if self.case_set != RANDOM_CHALLENGE_CASE_SET:
             raise ValueError("Random updraft challenge cases must use the after-freeze case set.")
+        if not self.controller_frozen:
+            raise ValueError("Random updraft challenge cases require controller_frozen=True.")
+        if self.runs_full_simulation:
+            raise ValueError("Random updraft challenge preflight must not run full simulation.")
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -83,6 +114,8 @@ class RandomUpdraftChallengeConfig:
             "reference_horizon_s": float(self.reference_horizon_s),
             "wind_mode": self.wind_mode,
             "case_set": self.case_set,
+            "controller_frozen": bool(self.controller_frozen),
+            "runs_full_simulation": bool(self.runs_full_simulation),
         }
 
 
@@ -161,27 +194,78 @@ class RandomUpdraftChallengeMethodRecord:
     fallback_used: bool
     fallback_reason: str | None
     decision_record: dict[str, object]
+    scenario_seed: int | None = None
+    controller_config_id: str | None = None
+    primitive_library_id: str | None = "smoke_compressed_library"
+    returnability_graph_id: str | None = "smoke_returnability_graph"
+    useful_lift_exposure: float | None = None
+    runtime_ms: float = 0.0
+    filtered_count_by_stage: dict[str, int] | None = None
 
     def to_record(self) -> dict[str, object]:
+        decision = _jsonable(self.decision_record)
+        if not isinstance(decision, dict):
+            decision = {}
+        rejection_reasons = decision.get("rejection_reasons", ())
+        active_constraints = decision.get("active_constraints", ())
+        filtered = self.filtered_count_by_stage
+        if filtered is None:
+            decision_filtered = decision.get("filtered_count_by_stage", {})
+            filtered = decision_filtered if isinstance(decision_filtered, dict) else {}
+        method_name = BASELINE_ALIASES.get(self.selector_name, self.selector_name)
+        predicted_successor = _optional_str(
+            decision.get("predicted_successor_class", decision.get("selected_exit_class"))
+        )
+        failure_mode = self.failure_reason
         return {
             "case_id": self.case_id,
             "case_set": self.case_set,
+            "case_family": self.environment_family,
             "environment_family": self.environment_family,
+            "method_name": method_name,
             "selector_name": self.selector_name,
+            "scenario_seed": self.scenario_seed,
+            "controller_config_id": self.controller_config_id or f"{method_name}_preflight",
+            "primitive_library_id": self.primitive_library_id,
+            "returnability_graph_id": self.returnability_graph_id,
+            "request_id": decision.get("request_id"),
+            "decision_type": decision.get("decision_type", _default_decision_type(self.selector_name, self.selected_primitive_id)),
             "selected_candidate_id": self.selected_candidate_id,
             "selected_primitive_id": self.selected_primitive_id,
+            "requested_primitive_id": decision.get("requested_primitive_id"),
+            "degradation_level": int(decision.get("degradation_level", 0) or 0),
+            "rejection_reasons": list(rejection_reasons) if isinstance(rejection_reasons, (list, tuple)) else [],
+            "active_constraints": list(active_constraints) if isinstance(active_constraints, (list, tuple)) else [],
+            "predicted_successor_class": predicted_successor,
+            "predicted_returnability": _optional_float(decision.get("predicted_returnability")),
+            "predicted_safety_margin": _optional_float(
+                decision.get("predicted_safety_margin", self.min_safety_margin_m)
+            ),
+            "predicted_energy_delta": _optional_float(
+                decision.get("predicted_energy_delta", self.terminal_specific_energy_change_j_kg)
+            ),
+            "predicted_lift_exposure": _optional_float(
+                decision.get("predicted_lift_exposure", self.useful_lift_exposure)
+            ),
+            "actual_successor_class": decision.get("actual_successor_class", decision.get("selected_exit_class")),
             "rollout_success": bool(self.rollout_success),
             "gate_crossed": self.gate_crossed,
             "gate_miss_distance_m": self.gate_miss_distance_m,
             "min_safety_margin_m": self.min_safety_margin_m,
             "terminal_specific_energy_margin_j_kg": self.terminal_specific_energy_margin_j_kg,
             "terminal_specific_energy_change_j_kg": self.terminal_specific_energy_change_j_kg,
+            "useful_lift_exposure": self.useful_lift_exposure,
             "max_angle_of_attack_rad": self.max_angle_of_attack_rad,
             "max_command_abs_rad": self.max_command_abs_rad,
             "failure_reason": self.failure_reason,
+            "failure_mode": failure_mode,
+            "runtime_ms": float(decision.get("runtime_ms", self.runtime_ms) or 0.0),
+            "candidate_count": int(decision.get("candidate_count", 0) or 0),
+            "admissible_candidate_count": int(decision.get("admissible_candidate_count", 0) or 0),
+            "filtered_count_by_stage": dict(sorted((str(key), int(value)) for key, value in filtered.items())),
             "fallback_used": bool(self.fallback_used),
             "fallback_reason": self.fallback_reason,
-            "decision_record": _jsonable(self.decision_record),
+            "decision_record": decision,
         }
 
 
@@ -249,10 +333,21 @@ def run_random_updraft_challenge_campaign(
     records: list[RandomUpdraftChallengeMethodRecord] = []
     for case in case_tuple:
         for selector_name in cfg.selectors:
-            if selector_name == SELECTOR_REFERENCE_TRACKING:
-                records.append(_reference_tracking_record(case, cfg))
+            normalised = _normalise_selector_name(selector_name)
+            if normalised == SELECTOR_TRAJECTORY_TRACKING:
+                records.append(_reference_tracking_record(case, cfg, selector_name=selector_name))
                 continue
-            decision = _selector_decision(selector_name, case, governor, selector, cfg.tier)
+            if normalised in _SCAFFOLD_METHODS:
+                records.append(_baseline_scaffold_record(case, normalised))
+                continue
+            decision = _selector_decision(
+                normalised,
+                case,
+                governor,
+                selector,
+                cfg.tier,
+                record_selector_name=selector_name,
+            )
             records.append(_primitive_rollout_record(case, decision, library, cfg))
     return RandomUpdraftChallengeReport(records=tuple(records), config=cfg)
 
@@ -273,33 +368,47 @@ def _selector_decision(
     governor: OnlineGovernor,
     selector: UnfilteredPrimitiveSelector,
     tier: str,
+    record_selector_name: str | None = None,
 ) -> _SelectedPrimitiveDecision:
-    if selector_name == SELECTOR_GOVERNOR:
-        return _governor_selection(governor.decide(case.initial_state, tier=tier))
-    if selector_name == SELECTOR_UNFILTERED:
-        return _unfiltered_selection(selector.decide(case.initial_state, tier=tier))
+    output_name = selector_name if record_selector_name is None else record_selector_name
+    if selector_name in {SELECTOR_GOVERNOR, SELECTOR_FILTER_ONLY, SELECTOR_LIFT_EVIDENCE_REMOVED}:
+        return _governor_selection(governor.decide(case.initial_state, tier=tier), selector_name=output_name)
+    if selector_name in {SELECTOR_UNFILTERED, SELECTOR_UNGOVERNED_PRIMITIVE, SELECTOR_NO_RETURNABILITY}:
+        return _unfiltered_selection(selector.decide(case.initial_state, tier=tier), selector_name=output_name)
     raise ValueError(f"Unsupported selector name: {selector_name}")
 
 
-def _governor_selection(decision: GovernorDecision) -> _SelectedPrimitiveDecision:
+def _governor_selection(decision: GovernorDecision, selector_name: str = SELECTOR_GOVERNOR) -> _SelectedPrimitiveDecision:
+    record = decision.to_record()
+    if selector_name == SELECTOR_LIFT_EVIDENCE_REMOVED:
+        record["removed_objective_terms"] = ["useful_lift_exposure", "terminal_energy_opportunity"]
+    if selector_name == SELECTOR_FILTER_ONLY:
+        record["degradation_enabled"] = False
     return _SelectedPrimitiveDecision(
-        selector_name=SELECTOR_GOVERNOR,
+        selector_name=selector_name,
         selected_candidate_id=decision.selected_candidate_id,
         selected_primitive_id=decision.selected_primitive_id or decision.selected_candidate_id,
         fallback_used=decision.fallback_used,
         fallback_reason=decision.fallback_reason,
-        decision_record=decision.to_record(),
+        decision_record=record,
     )
 
 
-def _unfiltered_selection(decision: UnfilteredSelectionDecision) -> _SelectedPrimitiveDecision:
+def _unfiltered_selection(
+    decision: UnfilteredSelectionDecision,
+    selector_name: str = SELECTOR_UNFILTERED,
+) -> _SelectedPrimitiveDecision:
+    record = decision.to_record()
+    if selector_name == SELECTOR_NO_RETURNABILITY:
+        record["returnability_filter_enabled"] = False
+        record["local_safety_filter_enabled"] = True
     return _SelectedPrimitiveDecision(
-        selector_name=SELECTOR_UNFILTERED,
+        selector_name=selector_name,
         selected_candidate_id=decision.selected_candidate_id,
         selected_primitive_id=decision.selected_candidate_id,
         fallback_used=decision.fallback_used,
         fallback_reason=decision.fallback_reason,
-        decision_record=decision.to_record(),
+        decision_record=record,
     )
 
 
@@ -358,12 +467,16 @@ def _primitive_rollout_record(
         fallback_used=decision.fallback_used,
         fallback_reason=decision.fallback_reason,
         decision_record=decision.decision_record,
+        scenario_seed=case.seed,
+        controller_config_id=f"{decision.selector_name}_preflight",
+        useful_lift_exposure=_decision_lift_exposure(decision.decision_record),
     )
 
 
 def _reference_tracking_record(
     case: RandomUpdraftChallengeCase,
     config: RandomUpdraftChallengeConfig,
+    selector_name: str = SELECTOR_REFERENCE_TRACKING,
 ) -> RandomUpdraftChallengeMethodRecord:
     tracking_record = run_reference_tracking_rollout(
         initial_state=case.initial_state,
@@ -391,7 +504,7 @@ def _reference_tracking_record(
         case_id=case.case_id,
         case_set=case.case_set,
         environment_family=case.environment_family,
-        selector_name=SELECTOR_REFERENCE_TRACKING,
+        selector_name=selector_name,
         selected_candidate_id=None,
         selected_primitive_id=None,
         rollout_success=bool(tracking_record["gate_success"]) and not controller_failed,
@@ -406,6 +519,48 @@ def _reference_tracking_record(
         fallback_used=False,
         fallback_reason=None,
         decision_record=tracking_record,
+        scenario_seed=case.seed,
+        controller_config_id=f"{selector_name}_preflight",
+    )
+
+
+def _baseline_scaffold_record(
+    case: RandomUpdraftChallengeCase,
+    selector_name: str,
+) -> RandomUpdraftChallengeMethodRecord:
+    baseline = instantiate_baseline(selector_name)
+    smoke = baseline.evaluate_smoke_case(
+        case_id=case.case_id,
+        case_family=case.environment_family,
+        scenario_seed=case.seed,
+        wind_information_available=baseline.spec.uses_wind_information,
+    ).to_record()
+    return RandomUpdraftChallengeMethodRecord(
+        case_id=case.case_id,
+        case_set=case.case_set,
+        environment_family=case.environment_family,
+        selector_name=selector_name,
+        selected_candidate_id=None,
+        selected_primitive_id=None,
+        rollout_success=bool(smoke["rollout_success"]),
+        gate_crossed=_optional_bool(smoke["gate_crossed"]),
+        gate_miss_distance_m=_optional_float(smoke["gate_miss_distance_m"]),
+        min_safety_margin_m=_optional_float(smoke["min_safety_margin_m"]),
+        terminal_specific_energy_margin_j_kg=_optional_float(smoke["terminal_specific_energy_margin_j_kg"]),
+        terminal_specific_energy_change_j_kg=_optional_float(smoke["terminal_specific_energy_change_j_kg"]),
+        max_angle_of_attack_rad=_optional_float(smoke["max_angle_of_attack_rad"]),
+        max_command_abs_rad=_optional_float(smoke["max_command_abs_rad"]),
+        failure_reason=_optional_str(smoke["failure_reason"]),
+        fallback_used=bool(smoke["fallback_used"]),
+        fallback_reason=None,
+        decision_record=smoke,
+        scenario_seed=case.seed,
+        controller_config_id=str(smoke["controller_config_id"]),
+        useful_lift_exposure=_optional_float(smoke["useful_lift_exposure"]),
+        runtime_ms=_optional_float(smoke["runtime_ms"]) or 0.0,
+        filtered_count_by_stage=smoke["filtered_count_by_stage"]
+        if isinstance(smoke["filtered_count_by_stage"], dict)
+        else {},
     )
 
 
@@ -433,6 +588,8 @@ def _non_rollout_record(
         fallback_used=decision.fallback_used,
         fallback_reason=decision.fallback_reason,
         decision_record=decision.decision_record,
+        scenario_seed=case.seed,
+        controller_config_id=f"{decision.selector_name}_preflight",
     )
 
 
@@ -675,6 +832,37 @@ def _selector_summary(records: tuple[RandomUpdraftChallengeMethodRecord, ...]) -
         ),
         "failure_reason_counts": _count(failures),
     }
+
+
+def _normalise_selector_name(selector_name: str) -> str:
+    if selector_name == SELECTOR_GOVERNOR:
+        return selector_name
+    return BASELINE_ALIASES.get(selector_name, selector_name)
+
+
+def _default_decision_type(selector_name: str, selected_primitive_id: str | None) -> str:
+    normalised = _normalise_selector_name(selector_name)
+    if normalised in _SCAFFOLD_METHODS or normalised == SELECTOR_TRAJECTORY_TRACKING:
+        return "baseline_scaffold"
+    return "rank" if selected_primitive_id is not None else "reject"
+
+
+def _decision_lift_exposure(decision_record: dict[str, object]) -> float | None:
+    value = decision_record.get("predicted_lift_exposure")
+    if value is not None:
+        return _optional_float(value)
+    scores = decision_record.get("candidate_scores")
+    selected = decision_record.get("selected_candidate_id")
+    if isinstance(scores, list) and selected is not None:
+        for item in scores:
+            if isinstance(item, dict) and item.get("candidate_id") == selected:
+                return _optional_float(item.get("mean_positive_vertical_wind_m_s"))
+    evidence_items = decision_record.get("candidate_evidence")
+    if isinstance(evidence_items, list) and selected is not None:
+        for item in evidence_items:
+            if isinstance(item, dict) and item.get("candidate_id") == selected:
+                return _optional_float(item.get("mean_positive_vertical_wind_m_s"))
+    return None
 
 
 def _count(values: Iterable[str]) -> dict[str, int]:

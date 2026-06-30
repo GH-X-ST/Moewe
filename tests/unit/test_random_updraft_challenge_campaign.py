@@ -158,6 +158,8 @@ def test_random_challenge_case_records_are_after_freeze_and_json_serialisable() 
         {"reference_horizon_s": 0.0},
         {"wind_mode": "bad"},
         {"case_set": "library_design"},
+        {"controller_frozen": False},
+        {"runs_full_simulation": True},
     ),
 )
 def test_invalid_random_challenge_config_rejects_bad_values(kwargs: dict[str, object]) -> None:
