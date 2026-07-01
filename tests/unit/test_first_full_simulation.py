@@ -5,17 +5,21 @@ import json
 from pathlib import Path
 import shutil
 
+import numpy as np
 import pytest
 
+import moewe.benchmarks.full_simulation as full_simulation
 from moewe.benchmarks import (
     FIRST_FULL_SIMULATION_METHODS,
     FirstFullSimulationConfig,
     require_first_full_simulation_guards,
     run_first_full_simulation_campaign,
 )
-from moewe.primitives import PrimitiveLibraryCandidate, PrimitiveLibraryQuery
+from moewe.campaigns import RandomUpdraftChallengeCase
+from moewe.primitives import PrimitiveEvidence, PrimitiveLibraryCandidate, PrimitiveLibraryQuery, PrimitiveRolloutResult
 from moewe.returnability import PrimitiveTransition, ReturnabilityGraph
 from moewe.sim.state import FlightState
+from moewe.tasks import FlightVolume, GatePlane, GateTraversalTask
 
 
 @pytest.fixture
@@ -154,6 +158,86 @@ def _library_and_graph() -> tuple[_LibraryStub, ReturnabilityGraph]:
     return library, graph
 
 
+def _mission_state(x_m: float) -> FlightState:
+    return FlightState(
+        position_w_m=np.array([x_m, 0.0, 1.0]),
+        euler_rad=np.zeros(3),
+        velocity_b_m_s=np.array([5.0, 0.0, 0.0]),
+        rates_b_rad_s=np.zeros(3),
+        surfaces_rad=np.zeros(3),
+    )
+
+
+def _mission_case() -> RandomUpdraftChallengeCase:
+    task = GateTraversalTask(
+        gate=GatePlane(
+            centre_w_m=np.array([0.25, 0.0, 1.0]),
+            normal_w=np.array([1.0, 0.0, 0.0]),
+            width_m=2.0,
+            height_m=2.0,
+        ),
+        flight_volume=FlightVolume(
+            x_min_m=-1.0,
+            x_max_m=0.25,
+            y_min_m=-1.0,
+            y_max_m=1.0,
+            z_min_m=0.2,
+            z_max_m=2.0,
+        ),
+        timeout_s=1.0,
+        angle_of_attack_limit_rad=1.0,
+    )
+    return RandomUpdraftChallengeCase(
+        case_id="mission_loop_case",
+        case_set="random_challenge_after_freeze",
+        environment_family="weak_random_single_source",
+        seed=7,
+        initial_state=_mission_state(0.0),
+        task=task,
+        wind_model=None,
+        wind_mode="panel",
+        factor_record={},
+    )
+
+
+def _fake_segment_rollout(**kwargs: object) -> PrimitiveRolloutResult:
+    initial_state = kwargs["initial_state"]
+    assert isinstance(initial_state, FlightState)
+    next_state = FlightState(
+        position_w_m=initial_state.position_w_m + np.array([0.1, 0.0, 0.0]),
+        euler_rad=initial_state.euler_rad,
+        velocity_b_m_s=initial_state.velocity_b_m_s,
+        rates_b_rad_s=initial_state.rates_b_rad_s,
+        surfaces_rad=initial_state.surfaces_rad,
+    )
+    config = kwargs["config"]
+    evidence = PrimitiveEvidence(
+        primitive_id="prim_mild",
+        family="bank_pitch_dwell_recovery",
+        controller_type="pd",
+        rollout_success=True,
+        min_safety_margin_m=0.1,
+        terminal_specific_energy_change_j_kg=0.0,
+        terminal_specific_energy_margin_j_kg=None,
+        max_angle_of_attack_rad=0.0,
+        max_command_abs_rad=0.0,
+        gate_miss_distance_m=None,
+        failure_reason=None,
+        scenario_id=getattr(config, "scenario_id"),
+        seed=getattr(config, "seed"),
+        rollout_duration_s=getattr(config, "dt_s"),
+    )
+    return PrimitiveRolloutResult(
+        primitive_id="prim_mild",
+        states=[initial_state, next_state],
+        commands_rad=np.zeros((1, 3)),
+        metrics=None,
+        evidence=evidence,
+        controller_failed=False,
+        failure_reason=None,
+    )
+
+
 def test_first_full_simulation_guards_require_freeze_write_and_external_output(
     external_output_root: Path,
 ) -> None:
@@ -242,6 +326,40 @@ def test_first_full_simulation_routes_governor_through_decision_interface(
     assert manifest["controller_frozen"] is True
     assert manifest["write_results"] is True
     json.dumps(report.to_summary(), sort_keys=True)
+
+
+def test_first_full_simulation_repeats_primitive_decisions_until_exit_gate(
+    external_output_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library, graph = _library_and_graph()
+    library.compressed.candidate_index["prim_mild"] = object()
+    monkeypatch.setattr(full_simulation, "_first_full_simulation_cases", lambda config: (_mission_case(),))
+    monkeypatch.setattr(full_simulation, "rollout_primitive", _fake_segment_rollout)
+
+    report = run_first_full_simulation_campaign(
+        library=library,
+        graph=graph,
+        output_dir=external_output_root / "run",
+        config=FirstFullSimulationConfig(
+            full_case_count=1,
+            methods=("governor",),
+            dt_s=0.1,
+            max_duration_s=0.1,
+        ),
+        controller_frozen=True,
+        write_results=True,
+        public_repo_root=Path.cwd(),
+    )
+
+    record = report.records[0].to_record()
+    decision = record["decision_record"]
+
+    assert record["rollout_success"] is True
+    assert record["gate_crossed"] is True
+    assert decision["mission_rollout"] is True
+    assert decision["mission_decision_count"] == 3
+    assert decision["selected_primitive_sequence"] == ["prim_mild", "prim_mild", "prim_mild"]
 
 
 def test_first_full_simulation_ablation_records_have_required_semantics(

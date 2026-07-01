@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from moewe.sim.glider_model import GliderModel
+from moewe.sim.frames import body_to_world_rows
+from moewe.sim.glider_model import GliderModel, nominal_glider
 from moewe.sim.state import FlightState
 
 from .metrics import FailureReason, GateTaskMetrics, specific_energy_j_kg
@@ -19,6 +20,7 @@ from .scenario import (
 )
 
 EPS = 1e-12
+BODY_AXES_B = np.eye(3)
 
 
 def _unit(vector: np.ndarray) -> np.ndarray:
@@ -27,6 +29,33 @@ def _unit(vector: np.ndarray) -> np.ndarray:
     if norm <= EPS:
         raise ValueError("Gate direction vectors must be non-zero.")
     return values / norm
+
+
+@dataclass(frozen=True)
+class _AirframeEnvelope:
+    half_length_m: float
+    half_span_m: float
+    half_height_m: float
+
+
+def _airframe_envelope(model: GliderModel) -> _AirframeEnvelope:
+    strips = model.strips
+    centres = np.asarray(strips.r_strip_b_m, dtype=float)
+    chord = np.asarray(strips.chord_m, dtype=float)
+    x_min = float(np.min(centres[:, 0] - chord))
+    x_max = float(np.max(centres[:, 0] + chord))
+    z_min = float(np.min(centres[:, 2] - 0.5 * chord))
+    z_max = float(np.max(centres[:, 2] + 0.5 * chord))
+    return _AirframeEnvelope(
+        half_length_m=max(abs(x_min), abs(x_max)),
+        half_span_m=0.5 * float(model.b_ref_m),
+        half_height_m=max(abs(z_min), abs(z_max)),
+    )
+
+
+def _interpolate_state(prev: FlightState, curr: FlightState, fraction: float) -> FlightState:
+    alpha = float(np.clip(fraction, 0.0, 1.0))
+    return FlightState.from_vector((1.0 - alpha) * prev.as_vector() + alpha * curr.as_vector())
 
 
 @dataclass(frozen=True)
@@ -106,6 +135,38 @@ class GateTraversalTask:
     timeout_s: float
     required_terminal_specific_energy_j_kg: float = 0.0
     angle_of_attack_limit_rad: float | None = None
+    require_airframe_clearance: bool = True
+    clearance_margin_m: float = 0.0
+
+    def _crossing_fraction(self, start_w_m: np.ndarray, end_w_m: np.ndarray) -> float | None:
+        d0 = self.gate.signed_distance_m(start_w_m)
+        d1 = self.gate.signed_distance_m(end_w_m)
+        if d0 == 0.0:
+            return 0.0
+        if d0 * d1 > 0.0:
+            return None
+        denom = d0 - d1
+        return 0.0 if abs(denom) <= EPS else float(np.clip(d0 / denom, 0.0, 1.0))
+
+    def _airframe_gate_miss_distance_m(self, state: FlightState, model: GliderModel) -> float:
+        lateral, vertical = self.gate.coordinates_m(state.position_w_m)
+        envelope = _airframe_envelope(model)
+        body_axes_w = body_to_world_rows(BODY_AXES_B, state.euler_rad)
+        half_extents = np.array(
+            [envelope.half_length_m, envelope.half_span_m, envelope.half_height_m],
+            dtype=float,
+        )
+        lateral_extent = float(np.sum(np.abs(body_axes_w @ self.gate.lateral_axis_w) * half_extents))
+        vertical_extent = float(np.sum(np.abs(body_axes_w @ self.gate.vertical_axis_w) * half_extents))
+        margin = max(float(self.clearance_margin_m), 0.0)
+        lateral_excess = max(abs(lateral) + lateral_extent + margin - 0.5 * float(self.gate.width_m), 0.0)
+        vertical_excess = max(abs(vertical) + vertical_extent + margin - 0.5 * float(self.gate.height_m), 0.0)
+        return float(np.hypot(lateral_excess, vertical_excess))
+
+    def _gate_miss_distance_m(self, state: FlightState, model: GliderModel) -> float:
+        if self.require_airframe_clearance:
+            return self._airframe_gate_miss_distance_m(state, model)
+        return self.gate.miss_distance_m(state.position_w_m)
 
     def _max_angle_of_attack(
         self,
@@ -137,25 +198,43 @@ class GateTraversalTask:
             raise ValueError("Task evaluation requires at least one state.")
 
         state_list = list(states)
-        min_margin = min(self.flight_volume.min_margin_m(state.position_w_m) for state in state_list)
-        non_finite = any(not state.finite() for state in state_list)
-        max_alpha = self._max_angle_of_attack(state_list, model, wind_model, wind_mode)
-        flight_time = float(dt_s) * float(max(len(state_list) - 1, 0))
-        terminal_energy_margin = (
-            specific_energy_j_kg(state_list[-1]) - float(self.required_terminal_specific_energy_j_kg)
-        )
-
+        gate_model = nominal_glider() if model is None else model
         gate_crossed = False
+        crossing_index: int | None = None
+        crossing_point: np.ndarray | None = None
         best_miss = float("inf")
-        for prev, curr in zip(state_list[:-1], state_list[1:]):
+        for index, (prev, curr) in enumerate(zip(state_list[:-1], state_list[1:]), start=1):
+            if not prev.finite() or not curr.finite():
+                continue
             crossed, point, miss = self.gate.segment_crossing(prev.position_w_m, curr.position_w_m)
-            best_miss = min(best_miss, float(miss), self.gate.miss_distance_m(prev.position_w_m), self.gate.miss_distance_m(curr.position_w_m))
-            if crossed and self.gate.contains_projection(point):
+            prev_miss = self._gate_miss_distance_m(prev, gate_model)
+            curr_miss = self._gate_miss_distance_m(curr, gate_model)
+            point_miss = float("inf") if self.require_airframe_clearance else float(miss)
+            best_miss = min(best_miss, point_miss, prev_miss, curr_miss)
+            crossing_fraction = self._crossing_fraction(prev.position_w_m, curr.position_w_m) if crossed else None
+            crossing_state = None if crossing_fraction is None else _interpolate_state(prev, curr, crossing_fraction)
+            crossing_miss = float("inf") if crossing_state is None else self._gate_miss_distance_m(crossing_state, gate_model)
+            if crossed and crossing_miss <= EPS:
                 gate_crossed = True
+                crossing_index = index
+                crossing_point = point
                 best_miss = 0.0
                 break
+            best_miss = min(best_miss, crossing_miss)
         if len(state_list) == 1:
-            best_miss = self.gate.miss_distance_m(state_list[0].position_w_m)
+            best_miss = self._gate_miss_distance_m(state_list[0], gate_model)
+
+        metric_states = state_list if crossing_index is None else state_list[: crossing_index + 1]
+        volume_positions = [state.position_w_m for state in metric_states]
+        if crossing_point is not None:
+            volume_positions[-1] = crossing_point
+        min_margin = min(self.flight_volume.min_margin_m(position) for position in volume_positions)
+        non_finite = any(not state.finite() for state in metric_states)
+        max_alpha = self._max_angle_of_attack(metric_states, model, wind_model, wind_mode)
+        flight_time = float(dt_s) * float(max(len(metric_states) - 1, 0))
+        terminal_energy_margin = (
+            specific_energy_j_kg(metric_states[-1]) - float(self.required_terminal_specific_energy_j_kg)
+        )
 
         failure = FailureReason.NONE
         if non_finite:
@@ -163,8 +242,8 @@ class GateTraversalTask:
         elif self.angle_of_attack_limit_rad is not None and max_alpha > float(self.angle_of_attack_limit_rad):
             failure = FailureReason.STALL_LIMIT
         else:
-            for state in state_list:
-                reason = self.flight_volume.failure_reason(state.position_w_m)
+            for position in volume_positions:
+                reason = self.flight_volume.failure_reason(position)
                 if reason is not None:
                     failure = FailureReason(reason)
                     break
@@ -185,7 +264,7 @@ class GateTraversalTask:
 
 
 def front_exit_gate() -> GatePlane:
-    """Return the measured true-safe front-wall exit face."""
+    """Return the measured rectangular exit gate on the front wall."""
 
     return GatePlane(
         centre_w_m=np.array(FRONT_EXIT_GATE_CENTRE_W_M, dtype=float),

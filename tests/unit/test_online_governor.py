@@ -183,6 +183,33 @@ def test_retrieval_fallback_is_rejected_by_default() -> None:
     assert "retrieval_fallback_not_allowed" in decision.rejection_reasons
 
 
+def test_retrieval_fallback_can_use_supported_compatibility_class_when_enabled() -> None:
+    candidate = _candidate("prim_available", entry_class="available", exit_class="terminal")
+    graph = _graph(
+        (_transition("prim_available", "available", "terminal"),),
+        safe_classes=("available", "terminal"),
+        recoverable_classes=("available", "terminal"),
+    )
+    query = _query(
+        (candidate,),
+        entry_class="requested",
+        fallback_used=True,
+        fallback_reason="no_exact_entry_class",
+    )
+    governor = OnlineGovernor(
+        _FixedLibrary(query),
+        graph,
+        OnlineGovernorConfig(allow_retrieval_fallback=True),
+    )
+
+    decision = governor.decide(_state())
+
+    assert decision.fallback_used
+    assert decision.selected_candidate_id == "prim_available"
+    assert "entry_not_safe" not in decision.rejection_reasons
+    assert "entry_not_recoverable" not in decision.rejection_reasons
+
+
 def test_candidate_evidence_is_deterministic_and_json_serialisable() -> None:
     candidate = _candidate("prim_ok", represented_primitive_ids=("prim_ok", "prim_rep"))
     graph = _graph(

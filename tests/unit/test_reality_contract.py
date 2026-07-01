@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from moewe.sim.glider_model import nominal_glider
 from moewe.sim.state import FlightState
 from moewe.tasks import (
     FOUR_FAN_CENTERS_XY_M,
@@ -46,7 +47,7 @@ def test_true_safe_volume_matches_measured_arena_contract() -> None:
     assert TRUE_SAFE_FLIGHT_VOLUME.z_max_m == TRUE_SAFE_Z_W_M[1]
 
 
-def test_front_exit_gate_is_true_safe_front_face_not_launch_gate() -> None:
+def test_front_exit_gate_is_small_rectangle_on_true_safe_front_plane() -> None:
     gate = front_exit_gate()
 
     np.testing.assert_allclose(gate.centre_w_m, FRONT_EXIT_GATE_CENTRE_W_M)
@@ -55,6 +56,13 @@ def test_front_exit_gate_is_true_safe_front_face_not_launch_gate() -> None:
     assert gate.height_m == FRONT_EXIT_GATE_HEIGHT_M
     assert gate.centre_w_m[0] == TRUE_SAFE_X_W_M[1]
     assert gate.centre_w_m[0] > LAUNCH_GATE_NOMINAL_POSITION_W_M[0] + 5.0
+    assert gate.centre_w_m[1] == LAUNCH_GATE_NOMINAL_POSITION_W_M[1]
+    assert gate.centre_w_m[2] == LAUNCH_GATE_NOMINAL_POSITION_W_M[2]
+    assert gate.width_m < TRUE_SAFE_Y_W_M[1] - TRUE_SAFE_Y_W_M[0]
+    assert gate.height_m < TRUE_SAFE_Z_W_M[1] - TRUE_SAFE_Z_W_M[0]
+    assert gate.width_m > nominal_glider().b_ref_m
+    assert np.isclose(gate.width_m, 1.0)
+    assert np.isclose(gate.height_m, 0.8)
 
 
 def test_launch_gate_compliance_rejects_old_origin_initial_state() -> None:

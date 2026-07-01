@@ -84,7 +84,7 @@ def dense_smoke_grammar() -> PrimitiveGrammarSpec:
         pitch_pulse=PitchPulseSpec(delta_pitch_rad=(-0.08, -0.04, 0.0, 0.04, 0.08), duration_s=0.2),
         dwell=DwellSpec(duration_s=(0.1, 0.2)),
         recovery=RecoverySpec(duration_s=0.2, mode="nominal"),
-        controller_types=("pd",),
+        controller_types=("lqr",),
         family="bank_pitch_dwell_recovery",
     )
 
@@ -174,7 +174,7 @@ class StructuredCase:
             scenario_id=self.case_id,
             seed=self.seed,
             entry_perturbation=_entry_perturbation_for_case(self),
-            rollout_config=PrimitiveRolloutConfig(dt_s=0.01, max_duration_s=0.08)
+            rollout_config=PrimitiveRolloutConfig(dt_s=0.01, max_duration_s=None)
             if rollout_config is None
             else rollout_config,
             thresholds=_default_thresholds() if thresholds is None else thresholds,
@@ -190,7 +190,7 @@ StructuredDesignCase = StructuredCase
 class StructuredDesignMatrixSpec:
     """Structured library design matrix settings."""
 
-    rollout_config: PrimitiveRolloutConfig = PrimitiveRolloutConfig(dt_s=0.01, max_duration_s=0.08)
+    rollout_config: PrimitiveRolloutConfig = PrimitiveRolloutConfig(dt_s=0.01, max_duration_s=None)
     thresholds: AcceptanceThresholds = AcceptanceThresholds()
     nominal_strength_m_s: float = 1.0
     nominal_ring_radius_m: float = 0.35

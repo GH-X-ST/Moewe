@@ -26,7 +26,7 @@ def test_structured_library_build_records_library_design_traceability() -> None:
     assert {record["case_set"] for record in records} == {"library_design"}
     assert all(record["primitive_id"] for record in records)
     assert all(record["family"] == "bank_pitch_dwell_recovery" for record in records)
-    assert all(record["controller_type"] == "pd" for record in records)
+    assert all(record["controller_type"] == "lqr" for record in records)
     assert all(record["entry_class"] for record in records)
     assert all(record["exit_class"] for record in records)
 
@@ -59,3 +59,9 @@ def test_default_structured_library_build_uses_deterministic_library_design_case
     assert all(not case.randomized for case in report.design_cases)
     assert all(case.seed is None for case in report.design_cases)
     assert not any(record["design_case_id"].startswith("challenge_") for record in report.to_records())
+
+
+def test_structured_library_design_cases_validate_complete_primitives_by_default() -> None:
+    scenario = build_structured_library_design_cases()[0].to_validation_scenario()
+
+    assert scenario.rollout_config.max_duration_s is None

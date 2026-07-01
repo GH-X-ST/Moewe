@@ -8,9 +8,11 @@ import math
 import numpy as np
 
 from moewe.control.interface import CommandLimits, ControllerMetadata
+from moewe.control.linearise import finite_difference_linearisation, to_euler_discrete
+from moewe.control.lqr import solve_discrete_lqr
 from moewe.control.pd import PDController, PDGains
 from moewe.control.rollout import run_closed_loop
-from moewe.sim.actuator import ActuatorModel
+from moewe.sim.actuator import ActuatorConfig, ActuatorModel
 from moewe.sim.glider_model import GliderModel, nominal_glider
 from moewe.sim.integrator import IntegratorConfig
 from moewe.sim.state import FlightState
@@ -31,6 +33,9 @@ class PrimitiveRolloutConfig:
     max_duration_s: float | None = None
     command_limits: CommandLimits = CommandLimits()
     pd_gains: PDGains = PDGains()
+    lqr_active_state_indices: tuple[int, ...] = (3, 4, 5, 9, 10, 11, 12, 13, 14)
+    lqr_q_weights: tuple[float, ...] = (4.0, 6.0, 2.0, 0.4, 0.6, 0.3, 0.2, 0.2, 0.2)
+    lqr_r_weights: tuple[float, float, float] = (0.1, 0.1, 0.1)
     scenario_id: str = "primitive_smoke"
     seed: int | None = 0
 
@@ -70,6 +75,44 @@ class ReferencePDController:
 
 
 @dataclass(frozen=True)
+class ReferenceLQRController:
+    """Time-invariant LQR stabiliser tracking a primitive reference."""
+
+    reference: PrimitiveReference
+    gain: np.ndarray
+    active_state_indices: tuple[int, ...]
+    command_limits: CommandLimits = CommandLimits()
+    metadata: ControllerMetadata = ControllerMetadata(
+        controller_type="lqr",
+        description="time-invariant primitive-local LQR stabiliser",
+        reference="finite_difference_local_linear_model",
+    )
+
+    def __post_init__(self) -> None:
+        gain = np.asarray(self.gain, dtype=float)
+        if gain.shape != (3, len(self.active_state_indices)):
+            raise ValueError("Primitive LQR gain must have shape (3, active_state_count).")
+        if not np.isfinite(gain).all():
+            raise ValueError("Primitive LQR gain must be finite.")
+        object.__setattr__(self, "gain", gain)
+
+    @property
+    def reference_state(self) -> FlightState:
+        return self.reference.state_at(0.0)
+
+    @property
+    def reference_command_rad(self) -> np.ndarray:
+        return self.reference.command_at(0.0)
+
+    def command(self, time_s: float, state: FlightState) -> np.ndarray:
+        ref_state = self.reference.state_at(time_s)
+        ref_command = self.reference.command_at(time_s)
+        error = state.as_vector() - ref_state.as_vector()
+        error = error[np.asarray(self.active_state_indices, dtype=int)]
+        return self.command_limits.clip(ref_command - self.gain @ error)
+
+
+@dataclass(frozen=True)
 class PrimitiveRolloutResult:
     """Closed-loop rollout output and primitive evidence."""
 
@@ -85,17 +128,51 @@ class PrimitiveRolloutResult:
 def build_primitive_controller(
     primitive: PrimitiveCandidate,
     config: PrimitiveRolloutConfig | None = None,
-) -> ReferencePDController:
+    model: GliderModel | None = None,
+    actuator_config: ActuatorConfig | None = None,
+    wind_model: object | None = None,
+) -> ReferencePDController | ReferenceLQRController:
     """Build the supported local controller for a primitive."""
 
     cfg = PrimitiveRolloutConfig() if config is None else config
-    if primitive.controller_type != "pd":
-        raise ValueError(f"Unsupported primitive controller_type: {primitive.controller_type}")
-    return ReferencePDController(
-        reference=primitive.reference,
-        gains=cfg.pd_gains,
-        command_limits=cfg.command_limits,
-    )
+    if primitive.controller_type == "pd":
+        return ReferencePDController(
+            reference=primitive.reference,
+            gains=cfg.pd_gains,
+            command_limits=cfg.command_limits,
+        )
+    if primitive.controller_type == "lqr":
+        state0 = primitive.reference.state_at(0.0)
+        command0 = primitive.reference.command_at(0.0)
+        linearisation = finite_difference_linearisation(
+            state=state0,
+            command_rad=command0,
+            model=model,
+            actuator_config=ActuatorConfig() if actuator_config is None else actuator_config,
+            wind_model=wind_model,
+            wind_mode=cfg.wind_mode,
+        )
+        discrete = to_euler_discrete(linearisation, cfg.dt_s)
+        idx = np.asarray(cfg.lqr_active_state_indices, dtype=int)
+        q_weights = np.asarray(cfg.lqr_q_weights, dtype=float)
+        r_weights = np.asarray(cfg.lqr_r_weights, dtype=float)
+        if q_weights.shape != (idx.size,):
+            raise ValueError("lqr_q_weights must match lqr_active_state_indices.")
+        if r_weights.shape != (3,):
+            raise ValueError("lqr_r_weights must contain three command weights.")
+        gain = solve_discrete_lqr(
+            discrete.a[np.ix_(idx, idx)],
+            discrete.b[idx, :],
+            np.diag(q_weights),
+            np.diag(r_weights),
+        )
+        return ReferenceLQRController(
+            reference=primitive.reference,
+            gain=gain,
+            active_state_indices=tuple(int(value) for value in idx),
+            command_limits=cfg.command_limits,
+        )
+    raise ValueError(f"Unsupported primitive controller_type: {primitive.controller_type}")
 
 
 def _failure_result(
@@ -208,7 +285,14 @@ def rollout_primitive(
     steps = max(1, int(math.ceil(duration / float(cfg.dt_s))))
     glider = nominal_glider() if model is None else model
     try:
-        controller = build_primitive_controller(primitive, cfg)
+        actuator_config = actuator.config if actuator is not None else ActuatorConfig()
+        controller = build_primitive_controller(
+            primitive,
+            cfg,
+            model=glider,
+            actuator_config=actuator_config,
+            wind_model=wind_model,
+        )
     except ValueError as exc:
         return _failure_result(primitive, state0, str(exc), cfg)
     closed_loop = run_closed_loop(

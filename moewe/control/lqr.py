@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+try:
+    from scipy.linalg import solve_discrete_are
+except Exception:  # pragma: no cover - optional dependency fallback
+    solve_discrete_are = None
 
 from moewe.sim.state import FlightState
 
@@ -36,6 +40,18 @@ def solve_discrete_lqr(
         raise ValueError("R must match input dimension.")
     if not np.isfinite(a_m).all() or not np.isfinite(b_m).all():
         raise ValueError("LQR dynamics matrices must be finite.")
+
+    if solve_discrete_are is not None:
+        try:
+            p_are = solve_discrete_are(a_m, b_m, q_m, r_m)
+            s_are = r_m + b_m.T @ p_are @ b_m
+            gain_are = np.linalg.solve(s_are, b_m.T @ p_are @ a_m)
+        except Exception:
+            gain_are = None
+        if gain_are is not None:
+            if not np.isfinite(gain_are).all():
+                raise ValueError("Discrete algebraic Riccati solver produced non-finite values.")
+            return gain_are
 
     p = q_m.copy()
     for _ in range(int(max_iterations)):

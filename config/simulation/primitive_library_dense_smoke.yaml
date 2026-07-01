@@ -23,6 +23,7 @@ grammar:
     y_w_m: 2.0
     command_rad: [0.0, 0.0, 0.0]
     wind_mode: panel
+  hold_duration_s: 0.01
   bank_transition:
     target_bank_rad: [-0.3, -0.15, 0.0, 0.15, 0.3]
     duration_s: 0.2
@@ -34,7 +35,7 @@ grammar:
   recovery:
     mode: nominal
     duration_s: 0.2
-  controller_types: [pd]
+  controller_types: [lqr]
   candidate_count: 400
 structured_evidence:
   case_set: library_design
@@ -44,7 +45,7 @@ structured_evidence:
   used_for_library_construction: true
 rollout:
   dt_s: 0.01
-  max_duration_s: 0.08
+  max_duration_s: null
 acceptance_thresholds:
   min_safety_margin_m: 0.0
   max_angle_of_attack_rad: 0.3141592653589793

@@ -65,6 +65,7 @@ from .retrieve import PrimitiveLibrary, PrimitiveLibraryCandidate, PrimitiveLibr
 from .rollout import (
     PrimitiveRolloutConfig,
     PrimitiveRolloutResult,
+    ReferenceLQRController,
     ReferencePDController,
     build_primitive_controller,
     rollout_primitive,
@@ -124,6 +125,7 @@ __all__ = [
     "RecoveryPhase",
     "RecoverySpec",
     "ReferencePDController",
+    "ReferenceLQRController",
     "RetrievalTimingCheck",
     "RetentionDecision",
     "StructuredCase",

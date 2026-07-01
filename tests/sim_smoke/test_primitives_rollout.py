@@ -54,7 +54,7 @@ def test_primitive_smoke_rollout_returns_finite_history_and_evidence() -> None:
     assert np.isfinite(result.commands_rad).all()
     assert result.evidence.primitive_id == primitive.primitive_id
     assert result.evidence.family == primitive.family
-    assert result.evidence.controller_type == "pd"
+    assert result.evidence.controller_type == "lqr"
     assert np.isfinite(result.evidence.min_safety_margin_m)
     assert np.isfinite(result.evidence.terminal_specific_energy_margin_j_kg)
     assert np.isfinite(result.evidence.max_angle_of_attack_rad)

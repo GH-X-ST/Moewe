@@ -200,9 +200,10 @@ class OnlineGovernor:
             reasons.append("retrieval_fallback_not_allowed")
         if query.entry_class in self.graph.forbidden_classes:
             reasons.append("entry_forbidden")
-        if self.config.require_safe_entry and query.entry_class not in self.graph.safe_classes:
+        compatibility_entry_class = self._candidate_entry_class(query)
+        if self.config.require_safe_entry and compatibility_entry_class not in self.graph.safe_classes:
             reasons.append("entry_not_safe")
-        if self.config.require_recoverable_entry and query.entry_class not in self.graph.recoverable_classes:
+        if self.config.require_recoverable_entry and compatibility_entry_class not in self.graph.recoverable_classes:
             reasons.append("entry_not_recoverable")
         return _unique_ordered(reasons)
 

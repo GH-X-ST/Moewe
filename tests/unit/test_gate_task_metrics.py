@@ -50,6 +50,62 @@ def test_gate_crossing_success_metrics() -> None:
     assert metrics.terminal_specific_energy_margin_j_kg > 0.0
 
 
+def test_exit_gate_at_volume_boundary_terminates_before_outside_state_counts_as_wall() -> None:
+    task = GateTraversalTask(
+        gate=GatePlane(
+            centre_w_m=np.array([1.0, 0.0, 1.0]),
+            normal_w=np.array([1.0, 0.0, 0.0]),
+            width_m=1.0,
+            height_m=0.6,
+        ),
+        flight_volume=FlightVolume(
+            x_min_m=-1.0,
+            x_max_m=1.0,
+            y_min_m=-1.0,
+            y_max_m=1.0,
+            z_min_m=0.2,
+            z_max_m=2.0,
+        ),
+        timeout_s=1.0,
+        angle_of_attack_limit_rad=0.5,
+    )
+
+    metrics = task.evaluate([_state(0.9), _state(1.1)], dt_s=0.1)
+
+    assert metrics.success
+    assert metrics.gate_crossed
+    assert metrics.failure_reason == FailureReason.NONE
+    assert metrics.min_safety_margin_m == 0.0
+
+
+def test_gate_crossing_requires_airframe_clearance_not_only_cg_position() -> None:
+    task = GateTraversalTask(
+        gate=GatePlane(
+            centre_w_m=np.array([1.0, 0.0, 1.0]),
+            normal_w=np.array([1.0, 0.0, 0.0]),
+            width_m=0.6,
+            height_m=1.0,
+        ),
+        flight_volume=FlightVolume(
+            x_min_m=-1.0,
+            x_max_m=1.0,
+            y_min_m=-1.0,
+            y_max_m=1.0,
+            z_min_m=0.2,
+            z_max_m=2.0,
+        ),
+        timeout_s=1.0,
+        angle_of_attack_limit_rad=0.5,
+    )
+
+    metrics = task.evaluate([_state(0.9), _state(1.1)], dt_s=0.1, model=nominal_glider())
+
+    assert not metrics.success
+    assert not metrics.gate_crossed
+    assert metrics.gate_miss_distance_m > 0.0
+    assert metrics.failure_reason == FailureReason.WALL
+
+
 def test_gate_miss_distance_and_timeout_failure() -> None:
     metrics = _task().evaluate([_state(0.0, y_m=0.8), _state(2.0, y_m=0.8)], dt_s=0.1)
 

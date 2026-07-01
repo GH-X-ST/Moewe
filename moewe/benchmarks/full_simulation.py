@@ -35,8 +35,9 @@ from moewe.objectives import GateTraversalProposer, LiftExploitationProposer, Re
 from moewe.primitives import PrimitiveLibrary, PrimitiveLibraryCandidate, PrimitiveRolloutConfig, rollout_primitive
 from moewe.returnability import ReturnabilityGraph
 from moewe.sim.actuator import NAUSICAA_MAX_COMMAND_ABS_RAD
-from moewe.sim.glider_model import NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD
-from moewe.tasks import specific_energy_j_kg
+from moewe.sim.glider_model import NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD, nominal_glider
+from moewe.sim.state import FlightState
+from moewe.tasks import FailureReason, specific_energy_j_kg
 
 FIRST_FULL_SIMULATION_METHODS = (
     "governor",
@@ -345,7 +346,7 @@ def _full_simulation_context(
     graph: ReturnabilityGraph,
     config: FirstFullSimulationConfig,
 ) -> _FullSimulationContext:
-    governor_config = OnlineGovernorConfig(tier=config.tier)
+    governor_config = OnlineGovernorConfig(tier=config.tier, allow_retrieval_fallback=True)
     return _FullSimulationContext(
         governed=ManoeuvrePrimitiveGovernor(
             library,
@@ -381,17 +382,29 @@ def _run_method_case(
 ) -> RandomUpdraftChallengeMethodRecord:
     if method_name == "trajectory_tracking_lqr_tvlqr":
         return _reference_tracking_record(case, config)
-    request = _request_for_case(method_name, case, library, config)
+    return _primitive_mission_record(method_name, case, library, context, config)
+
+
+def _method_decision_for_state(
+    method_name: str,
+    case: RandomUpdraftChallengeCase,
+    state: FlightState,
+    library: PrimitiveLibrary,
+    context: _FullSimulationContext,
+    config: FirstFullSimulationConfig,
+    step_index: int,
+) -> _MethodDecision:
+    request = _request_for_case(method_name, case, library, config, state=state, step_index=step_index)
     if method_name == "governor":
-        decision = context.governed.decide(case.initial_state, request, tier=config.tier)
+        decision = context.governed.decide(state, request, tier=config.tier)
         method_decision = _decision_from_governor_record(method_name, decision.to_record())
     elif method_name == "filter_only_no_degradation":
-        decision = context.filter_only.decide(case.initial_state, request, tier=config.tier)
+        decision = context.filter_only.decide(state, request, tier=config.tier)
         record = decision.to_record()
         record["degradation_enabled"] = False
         method_decision = _decision_from_governor_record(method_name, record)
     elif method_name == "lift_evidence_removed":
-        decision = context.lift_removed.decide(case.initial_state, request, tier=config.tier)
+        decision = context.lift_removed.decide(state, request, tier=config.tier)
         record = decision.to_record()
         record["removed_objective_terms"] = ["useful_lift_exposure", "terminal_energy"]
         method_decision = _decision_from_governor_record(method_name, record)
@@ -399,6 +412,7 @@ def _run_method_case(
         method_decision = _objective_selector_decision(
             method_name,
             case,
+            state,
             library,
             request,
             config,
@@ -408,6 +422,7 @@ def _run_method_case(
         method_decision = _objective_selector_decision(
             method_name,
             case,
+            state,
             library,
             request,
             config,
@@ -415,7 +430,8 @@ def _run_method_case(
         )
     else:
         raise ValueError(f"Method is not implemented for performance records: {method_name}")
-    return _primitive_rollout_record(case, method_decision, library, config)
+    method_decision.decision_record["mission_step_index"] = int(step_index)
+    return method_decision
 
 
 def _request_for_case(
@@ -423,9 +439,12 @@ def _request_for_case(
     case: RandomUpdraftChallengeCase,
     library: PrimitiveLibrary,
     config: FirstFullSimulationConfig,
+    state: FlightState | None = None,
+    step_index: int = 0,
 ) -> PrimitiveRequest:
+    current_state = case.initial_state if state is None else state
     proposer_reason = "gate_default"
-    if _low_energy(case) or _near_boundary(case):
+    if _low_energy(case, current_state) or _near_boundary(case, current_state):
         proposer = RecoveryProposer()
         proposer_reason = "state_recovery"
     elif case.environment_family in {"hard_random_single_source", "random_two_source", "random_four_source"}:
@@ -433,10 +452,10 @@ def _request_for_case(
         proposer_reason = "strong_or_multi_source_updraft"
     else:
         proposer = GateTraversalProposer()
-    request = proposer.propose(case.initial_state)
-    query = library.query(case.initial_state, tier=config.tier)
+    request = proposer.propose(current_state)
+    query = library.query(current_state, tier=config.tier)
     if not query.candidates and proposer_reason != "state_recovery":
-        request = RecoveryProposer().propose(case.initial_state)
+        request = RecoveryProposer().propose(current_state)
         proposer_reason = "empty_candidate_set_recovery"
 
     score_terms = dict(request.objective_score_terms)
@@ -452,7 +471,7 @@ def _request_for_case(
 
     requested_id, candidate_ids = _objective_candidate_set(
         library,
-        case.initial_state,
+        current_state,
         tier=config.tier,
         preferred_family=request.preferred_family,
         requested_aggressiveness=request.requested_aggressiveness,
@@ -466,9 +485,10 @@ def _request_for_case(
         "proposer_policy": proposer_reason,
         "spatial_memory": "off",
         "removed_objective_terms": removed_terms,
+        "mission_step_index": int(step_index),
     }
     return PrimitiveRequest(
-        request_id=f"objective:{metadata['proposer']}:{case.case_id}:{method_name}",
+        request_id=f"objective:{metadata['proposer']}:{case.case_id}:{method_name}:step_{int(step_index):03d}",
         task_intent=request.task_intent,
         preferred_family=request.preferred_family,
         requested_aggressiveness=request.requested_aggressiveness,
@@ -480,12 +500,11 @@ def _request_for_case(
     )
 
 
-def _low_energy(case: RandomUpdraftChallengeCase) -> bool:
-    return specific_energy_j_kg(case.initial_state) < float(case.task.required_terminal_specific_energy_j_kg)
+def _low_energy(case: RandomUpdraftChallengeCase, state: FlightState) -> bool:
+    return specific_energy_j_kg(state) < float(case.task.required_terminal_specific_energy_j_kg)
 
 
-def _near_boundary(case: RandomUpdraftChallengeCase) -> bool:
-    state = case.initial_state
+def _near_boundary(case: RandomUpdraftChallengeCase, state: FlightState) -> bool:
     volume = case.task.flight_volume
     return (
         float(state.position_w_m[2]) < float(volume.z_min_m) + 0.15
@@ -525,6 +544,7 @@ def _objective_candidate_set(
 def _objective_selector_decision(
     method_name: str,
     case: RandomUpdraftChallengeCase,
+    state: FlightState,
     library: PrimitiveLibrary,
     request: PrimitiveRequest,
     config: FirstFullSimulationConfig,
@@ -532,14 +552,15 @@ def _objective_selector_decision(
     local_safety_filter: bool,
 ) -> _MethodDecision:
     start_s = perf_counter()
-    query = library.query(case.initial_state, tier=config.tier)
+    query = library.query(state, tier=config.tier)
+    allow_retrieval_fallback = method_name in {"ungoverned_primitive_selector", "no_returnability_selector"}
     candidates = tuple(
         candidate
         for candidate in query.candidates
         if not local_safety_filter or _local_safety_ok(candidate, config)
     )
     selected = None
-    if candidates and (not query.fallback_used or method_name == "ungoverned_primitive_selector"):
+    if candidates and (not query.fallback_used or allow_retrieval_fallback):
         allowed = set(request.candidate_ids)
         ranked = tuple(
             candidate
@@ -557,7 +578,7 @@ def _objective_selector_decision(
             ),
         )
     rejection_reasons: list[str] = []
-    if query.fallback_used and method_name != "ungoverned_primitive_selector":
+    if query.fallback_used and not allow_retrieval_fallback:
         rejection_reasons.append("retrieval_fallback_not_allowed")
     if not query.candidates:
         rejection_reasons.append("no_retrieval_candidate")
@@ -622,64 +643,320 @@ def _decision_from_governor_record(method_name: str, record: dict[str, object]) 
     )
 
 
-def _primitive_rollout_record(
+def _primitive_mission_record(
+    method_name: str,
     case: RandomUpdraftChallengeCase,
-    decision: _MethodDecision,
     library: PrimitiveLibrary,
+    context: _FullSimulationContext,
     config: FirstFullSimulationConfig,
 ) -> RandomUpdraftChallengeMethodRecord:
-    primitive_id, primitive = _selected_primitive(library, decision)
-    if primitive is None:
-        reason = "no_selected_primitive" if primitive_id is None else "missing_selected_primitive"
-        return _non_rollout_record(case, decision, reason, config)
-
-    rollout_config = PrimitiveRolloutConfig(
+    start_s = perf_counter()
+    glider = nominal_glider()
+    mission_states: list[FlightState] = [case.initial_state]
+    step_records: list[dict[str, object]] = []
+    selected_candidate_ids: list[str] = []
+    selected_primitive_ids: list[str] = []
+    fallback_reasons: list[str] = []
+    filtered_totals: dict[str, int] = {}
+    candidate_count_total = 0
+    admissible_count_total = 0
+    predicted_lift_total = 0.0
+    predicted_lift_count = 0
+    max_command_abs = 0.0
+    failure_reason: str | None = None
+    timeout_s = float(case.task.timeout_s)
+    max_decisions = max(1, int(math.ceil(timeout_s / float(config.max_duration_s))) + 2)
+    metrics = case.task.evaluate(
+        mission_states,
         dt_s=float(config.dt_s),
-        wind_mode=case.wind_mode,
-        max_duration_s=float(config.max_duration_s),
-        scenario_id=f"{case.case_id}:{decision.method_name}",
-        seed=case.seed,
-    )
-    result = rollout_primitive(
-        primitive=primitive,
-        initial_state=case.initial_state,
-        task=case.task,
+        model=glider,
         wind_model=case.wind_model,
-        config=rollout_config,
+        wind_mode=case.wind_mode,
     )
-    evidence = result.evidence
-    metrics = result.metrics
-    record = dict(decision.decision_record)
-    record["actual_successor_class"] = _actual_successor_class(library, result.states[-1])
+
+    for step_index in range(max_decisions):
+        elapsed_s = _mission_elapsed_s(mission_states, config)
+        if elapsed_s >= timeout_s:
+            break
+        state = mission_states[-1]
+        decision = _method_decision_for_state(
+            method_name,
+            case,
+            state,
+            library,
+            context,
+            config,
+            step_index,
+        )
+        step_record = dict(decision.decision_record)
+        step_record["step_start_time_s"] = elapsed_s
+        candidate_count_total += int(step_record.get("candidate_count", 0) or 0)
+        admissible_count_total += int(step_record.get("admissible_candidate_count", 0) or 0)
+        _merge_filtered_counts(filtered_totals, step_record.get("filtered_count_by_stage"))
+        if decision.selected_candidate_id is not None:
+            selected_candidate_ids.append(decision.selected_candidate_id)
+        if decision.fallback_used and decision.fallback_reason is not None:
+            fallback_reasons.append(decision.fallback_reason)
+        lift = _optional_float(step_record.get("predicted_lift_exposure"))
+        if lift is not None:
+            predicted_lift_total += lift
+            predicted_lift_count += 1
+
+        primitive_id, primitive = _selected_primitive(library, decision)
+        if primitive is None:
+            failure_reason = "no_selected_primitive" if primitive_id is None else "missing_selected_primitive"
+            step_record["actual_successor_class"] = _actual_successor_class(library, state)
+            step_record["primitive_rollout_success"] = False
+            step_record["primitive_failure_reason"] = failure_reason
+            step_records.append(step_record)
+            break
+
+        selected_primitive_ids.append(str(primitive_id))
+        segment_duration_s = min(float(config.max_duration_s), max(float(config.dt_s), timeout_s - elapsed_s))
+        rollout_config = PrimitiveRolloutConfig(
+            dt_s=float(config.dt_s),
+            wind_mode=case.wind_mode,
+            max_duration_s=segment_duration_s,
+            scenario_id=f"{case.case_id}:{decision.method_name}:step_{step_index:03d}",
+            seed=case.seed,
+        )
+        result = rollout_primitive(
+            primitive=primitive,
+            initial_state=state,
+            task=None,
+            wind_model=case.wind_model,
+            config=rollout_config,
+        )
+        if len(result.states) > 1:
+            mission_states.extend(result.states[1:])
+        max_command_abs = max(max_command_abs, float(result.evidence.max_command_abs_rad))
+        metrics = case.task.evaluate(
+            mission_states,
+            dt_s=float(config.dt_s),
+            model=glider,
+            wind_model=case.wind_model,
+            wind_mode=case.wind_mode,
+        )
+        step_record["selected_primitive_id"] = primitive_id
+        step_record["actual_successor_class"] = _actual_successor_class(library, mission_states[-1])
+        step_record["primitive_rollout_success"] = bool(result.evidence.rollout_success)
+        step_record["primitive_failure_reason"] = result.evidence.failure_reason
+        step_record["segment_duration_s"] = float(result.evidence.rollout_duration_s)
+        step_record["segment_state_count"] = len(result.states)
+        step_record["mission_flight_time_s"] = float(metrics.flight_time_s)
+        step_record["mission_gate_crossed"] = bool(metrics.gate_crossed)
+        step_record["mission_gate_miss_distance_m"] = float(metrics.gate_miss_distance_m)
+        step_records.append(step_record)
+
+        if metrics.success:
+            failure_reason = None
+            break
+        metric_failure = _failure_reason_value(metrics.failure_reason)
+        if metric_failure != FailureReason.TIMEOUT.value:
+            failure_reason = metric_failure
+            break
+        if result.controller_failed:
+            failure_reason = result.failure_reason or "controller_failed"
+            break
+        if result.evidence.failure_reason is not None:
+            failure_reason = result.evidence.failure_reason
+            break
+        if len(result.states) <= 1:
+            failure_reason = "zero_duration_rollout"
+            break
+
+    metrics = case.task.evaluate(
+        mission_states,
+        dt_s=float(config.dt_s),
+        model=glider,
+        wind_model=case.wind_model,
+        wind_mode=case.wind_mode,
+    )
+    if not metrics.success and failure_reason is None:
+        failure_reason = _failure_reason_value(metrics.failure_reason)
+    decision_record = _mission_decision_record(
+        method_name=method_name,
+        case=case,
+        library=library,
+        step_records=step_records,
+        selected_candidate_ids=selected_candidate_ids,
+        selected_primitive_ids=selected_primitive_ids,
+        fallback_reasons=fallback_reasons,
+        filtered_totals=filtered_totals,
+        candidate_count_total=candidate_count_total,
+        admissible_count_total=admissible_count_total,
+        predicted_lift_total=predicted_lift_total,
+        predicted_lift_count=predicted_lift_count,
+        metrics=metrics,
+        runtime_ms=_elapsed_ms(start_s),
+        failure_reason=failure_reason,
+        config=config,
+    )
+    first_candidate_id = selected_candidate_ids[0] if selected_candidate_ids else None
+    first_primitive_id = selected_primitive_ids[0] if selected_primitive_ids else None
     return RandomUpdraftChallengeMethodRecord(
         case_id=case.case_id,
         case_set=case.case_set,
         environment_family=case.environment_family,
-        selector_name=decision.method_name,
-        selected_candidate_id=decision.selected_candidate_id,
-        selected_primitive_id=primitive_id,
-        rollout_success=bool(evidence.rollout_success),
-        gate_crossed=None if metrics is None else bool(metrics.gate_crossed),
-        gate_miss_distance_m=_optional_float(evidence.gate_miss_distance_m),
-        min_safety_margin_m=float(evidence.min_safety_margin_m),
-        terminal_specific_energy_margin_j_kg=_optional_float(evidence.terminal_specific_energy_margin_j_kg),
-        terminal_specific_energy_change_j_kg=float(evidence.terminal_specific_energy_change_j_kg),
-        max_angle_of_attack_rad=float(evidence.max_angle_of_attack_rad),
-        max_command_abs_rad=float(evidence.max_command_abs_rad),
-        failure_reason=evidence.failure_reason,
-        fallback_used=decision.fallback_used,
-        fallback_reason=decision.fallback_reason,
-        decision_record=record,
+        selector_name=method_name,
+        selected_candidate_id=first_candidate_id,
+        selected_primitive_id=first_primitive_id,
+        rollout_success=bool(metrics.success),
+        gate_crossed=bool(metrics.gate_crossed),
+        gate_miss_distance_m=float(metrics.gate_miss_distance_m),
+        min_safety_margin_m=float(metrics.min_safety_margin_m),
+        terminal_specific_energy_margin_j_kg=float(metrics.terminal_specific_energy_margin_j_kg),
+        terminal_specific_energy_change_j_kg=specific_energy_j_kg(mission_states[-1])
+        - specific_energy_j_kg(case.initial_state),
+        max_angle_of_attack_rad=float(metrics.max_angle_of_attack_rad),
+        max_command_abs_rad=max_command_abs,
+        failure_reason=None if metrics.success else failure_reason,
+        fallback_used=bool(fallback_reasons),
+        fallback_reason=None if not fallback_reasons else fallback_reasons[0],
+        decision_record=decision_record,
         scenario_seed=case.seed,
-        controller_config_id=f"{decision.method_name}_first_full_simulation",
+        controller_config_id=f"{method_name}_first_full_simulation",
         primitive_library_id=_primitive_library_id(library),
         returnability_graph_id="first_full_simulation_returnability_graph",
-        useful_lift_exposure=_optional_float(record.get("predicted_lift_exposure")),
-        runtime_ms=_optional_float(record.get("runtime_ms")) or 0.0,
-        filtered_count_by_stage=record.get("filtered_count_by_stage")
-        if isinstance(record.get("filtered_count_by_stage"), dict)
-        else {},
+        useful_lift_exposure=None if predicted_lift_count == 0 else predicted_lift_total,
+        runtime_ms=_optional_float(decision_record.get("runtime_ms")) or 0.0,
+        filtered_count_by_stage=filtered_totals,
     )
+
+
+def _mission_decision_record(
+    *,
+    method_name: str,
+    case: RandomUpdraftChallengeCase,
+    library: PrimitiveLibrary,
+    step_records: list[dict[str, object]],
+    selected_candidate_ids: list[str],
+    selected_primitive_ids: list[str],
+    fallback_reasons: list[str],
+    filtered_totals: dict[str, int],
+    candidate_count_total: int,
+    admissible_count_total: int,
+    predicted_lift_total: float,
+    predicted_lift_count: int,
+    metrics: object,
+    runtime_ms: float,
+    failure_reason: str | None,
+    config: FirstFullSimulationConfig,
+) -> dict[str, object]:
+    base = dict(step_records[0]) if step_records else {}
+    decision_types = [str(record.get("decision_type")) for record in step_records if record.get("decision_type")]
+    degradation_levels = [int(record.get("degradation_level", 0) or 0) for record in step_records]
+    rejection_reasons = _unique_ordered(
+        [
+            str(reason)
+            for record in step_records
+            for reason in _as_list(record.get("rejection_reasons"))
+        ]
+        + ([] if failure_reason is None else [failure_reason])
+    )
+    active_constraints = _unique_ordered(
+        [
+            str(constraint)
+            for record in step_records
+            for constraint in _as_list(record.get("active_constraints"))
+        ]
+    )
+    predicted_safety = _finite_values(record.get("predicted_safety_margin") for record in step_records)
+    predicted_energy = _finite_values(record.get("predicted_energy_delta") for record in step_records)
+    predicted_returnability = _finite_values(record.get("predicted_returnability") for record in step_records)
+    final_successor_class = _actual_successor_class(library, case.initial_state)
+    if step_records:
+        final_successor_class = _optional_str(step_records[-1].get("actual_successor_class")) or final_successor_class
+    base.update(
+        {
+            "request_id": base.get("request_id") or f"mission:{case.case_id}:{method_name}",
+            "decision_type": _mission_decision_type(decision_types),
+            "selected_candidate_id": selected_candidate_ids[0] if selected_candidate_ids else None,
+            "selected_primitive_id": selected_primitive_ids[0] if selected_primitive_ids else None,
+            "selected_candidate_sequence": list(selected_candidate_ids),
+            "selected_primitive_sequence": list(selected_primitive_ids),
+            "degradation_level": max(degradation_levels) if degradation_levels else 0,
+            "rejection_reasons": list(rejection_reasons),
+            "active_constraints": list(active_constraints),
+            "predicted_successor_class": _last_non_empty(
+                record.get("predicted_successor_class") for record in step_records
+            ),
+            "predicted_returnability": min(predicted_returnability) if predicted_returnability else None,
+            "predicted_safety_margin": min(predicted_safety) if predicted_safety else None,
+            "predicted_energy_delta": sum(predicted_energy) if predicted_energy else None,
+            "predicted_lift_exposure": None if predicted_lift_count == 0 else predicted_lift_total,
+            "actual_successor_class": final_successor_class,
+            "candidate_count": int(candidate_count_total),
+            "admissible_candidate_count": int(admissible_count_total),
+            "filtered_count_by_stage": dict(sorted(filtered_totals.items())),
+            "fallback_used": bool(fallback_reasons),
+            "fallback_reason": None if not fallback_reasons else fallback_reasons[0],
+            "runtime_ms": float(runtime_ms),
+            "mission_rollout": True,
+            "mission_decision_count": len(step_records),
+            "mission_timeout_s": float(case.task.timeout_s),
+            "mission_decision_horizon_s": float(config.max_duration_s),
+            "mission_flight_time_s": float(metrics.flight_time_s),
+            "mission_success": bool(metrics.success),
+            "mission_gate_crossed": bool(metrics.gate_crossed),
+            "mission_gate_miss_distance_m": float(metrics.gate_miss_distance_m),
+            "mission_failure_reason": failure_reason,
+            "step_decision_records": step_records,
+        }
+    )
+    return base
+
+
+def _mission_decision_type(decision_types: list[str]) -> str:
+    if not decision_types:
+        return "reject"
+    if "degrade" in decision_types:
+        return "degrade"
+    if "accept" in decision_types:
+        return "accept"
+    if "rank" in decision_types:
+        return "rank"
+    if "reject" in decision_types:
+        return "reject"
+    return decision_types[0]
+
+
+def _mission_elapsed_s(states: list[FlightState], config: FirstFullSimulationConfig) -> float:
+    return float(config.dt_s) * float(max(len(states) - 1, 0))
+
+
+def _merge_filtered_counts(target: dict[str, int], value: object) -> None:
+    if not isinstance(value, dict):
+        return
+    for key, count in value.items():
+        try:
+            numeric = int(count)
+        except (TypeError, ValueError):
+            continue
+        target[str(key)] = target.get(str(key), 0) + numeric
+
+
+def _finite_values(values: Iterable[object]) -> list[float]:
+    result: list[float] = []
+    for value in values:
+        numeric = _optional_float(value)
+        if numeric is not None:
+            result.append(numeric)
+    return result
+
+
+def _last_non_empty(values: Iterable[object]) -> str | None:
+    result: str | None = None
+    for value in values:
+        text = _optional_str(value)
+        if text:
+            result = text
+    return result
+
+
+def _failure_reason_value(reason: object) -> str:
+    value = getattr(reason, "value", reason)
+    return str(value)
 
 
 def _reference_tracking_record(
@@ -693,7 +970,7 @@ def _reference_tracking_record(
         wind_model=case.wind_model,
         config=ReferenceTrackingConfig(
             dt_s=float(config.dt_s),
-            horizon_s=float(config.reference_horizon_s),
+            horizon_s=max(float(config.reference_horizon_s), float(case.task.timeout_s)),
             wind_mode=case.wind_mode,
         ),
     ).to_record()

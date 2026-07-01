@@ -296,8 +296,8 @@ class PrimitiveGrammarSpec:
     recovery: RecoverySpec = RecoverySpec()
     entry_condition: PrimitiveEntryCondition = PrimitiveEntryCondition()
     safety_limits: PrimitiveSafetyLimits = PrimitiveSafetyLimits()
-    hold_duration_s: float = 0.1
-    controller_types: tuple[str, ...] = ("pd",)
+    hold_duration_s: float = 0.01
+    controller_types: tuple[str, ...] = ("lqr",)
     family: str = "bank_pitch_dwell_recovery"
 
     @classmethod

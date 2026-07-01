@@ -40,9 +40,22 @@ def test_generated_primitive_records_are_inspectable_without_rollout() -> None:
     summary = primitive.summary()
 
     assert summary["primitive_id"] == primitive.primitive_id
-    assert summary["controller_type"] == "pd"
+    assert summary["controller_type"] == "lqr"
     assert summary["phase_names"] == ["hold", "bank_transition", "pitch_pulse", "dwell", "recovery"]
     assert primitive.metadata["command_order"] == "[aileron, elevator, rudder]"
+
+
+def test_default_primitive_enters_active_phase_within_decision_horizon() -> None:
+    primitive = next(
+        candidate
+        for candidate in generate_primitives(PrimitiveGrammarSpec.smoke())
+        if candidate.metadata["grammar_factors"]["target_bank_rad"] > 0.0
+    )
+
+    assert primitive.phases[0].name == "hold"
+    assert primitive.phases[0].duration_s < 0.10
+    assert primitive.reference.sample(0.05).phase_name == "bank_transition"
+    assert primitive.reference.state_at(0.05).euler_rad[0] > primitive.reference.state_at(0.0).euler_rad[0]
 
 
 def test_generated_primitive_metadata_contains_degradation_links() -> None:

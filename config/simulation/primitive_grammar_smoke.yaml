@@ -24,7 +24,7 @@ grammar:
     turn_rate_rad_s: 0.0
     command_rad: [0.0, 0.0, 0.0]
     wind_mode: panel
-  hold_duration_s: 0.1
+  hold_duration_s: 0.01
   bank_transition:
     target_bank_rad: [-0.2, 0.0, 0.2]
     duration_s: 0.2
@@ -36,7 +36,7 @@ grammar:
   recovery:
     mode: nominal
     duration_s: 0.2
-  controller_types: [pd]
+  controller_types: [lqr]
 entry_condition:
   min_airspeed_m_s: 3.0
   max_airspeed_m_s: 12.0
