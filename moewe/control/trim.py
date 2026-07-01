@@ -16,6 +16,7 @@ from moewe.sim.frames import body_to_world
 from moewe.sim.glider_model import GliderModel, nominal_glider
 from moewe.sim.rigid_body import rigid_body_derivative
 from moewe.sim.state import FlightState
+from moewe.tasks.scenario import LAUNCH_GATE_NOMINAL_POSITION_W_M
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,8 @@ class TrimSpec:
     bank_angle_rad: float = 0.0
     heading_rad: float = 0.0
     turn_rate_rad_s: float = 0.0
+    x_w_m: float = LAUNCH_GATE_NOMINAL_POSITION_W_M[0]
+    y_w_m: float = LAUNCH_GATE_NOMINAL_POSITION_W_M[1]
     altitude_m: float = 1.0
     command_rad: tuple[float, float, float] = (0.0, 0.0, 0.0)
     wind_mode: str = "panel"
@@ -81,7 +84,7 @@ def pseudo_trim(
     gamma = spec.resolved_flight_path_angle_rad()
     command = np.asarray(spec.command_rad, dtype=float).reshape(3)
     state = FlightState(
-        position_w_m=np.array([0.0, 0.0, float(spec.altitude_m)], dtype=float),
+        position_w_m=np.array([float(spec.x_w_m), float(spec.y_w_m), float(spec.altitude_m)], dtype=float),
         euler_rad=np.array([float(spec.bank_angle_rad), gamma, float(spec.heading_rad)], dtype=float),
         velocity_b_m_s=np.array([float(spec.airspeed_m_s), 0.0, 0.0], dtype=float),
         rates_b_rad_s=np.array([0.0, 0.0, float(spec.turn_rate_rad_s)], dtype=float),

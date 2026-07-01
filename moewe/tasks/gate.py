@@ -10,7 +10,13 @@ from moewe.sim.glider_model import GliderModel
 from moewe.sim.state import FlightState
 
 from .metrics import FailureReason, GateTaskMetrics, specific_energy_j_kg
-from .scenario import FlightVolume
+from .scenario import (
+    FRONT_EXIT_GATE_CENTRE_W_M,
+    FRONT_EXIT_GATE_HEIGHT_M,
+    FRONT_EXIT_GATE_NORMAL_W,
+    FRONT_EXIT_GATE_WIDTH_M,
+    FlightVolume,
+)
 
 EPS = 1e-12
 
@@ -176,3 +182,14 @@ class GateTraversalTask:
             max_angle_of_attack_rad=max_alpha,
             failure_reason=failure,
         )
+
+
+def front_exit_gate() -> GatePlane:
+    """Return the measured true-safe front-wall exit face."""
+
+    return GatePlane(
+        centre_w_m=np.array(FRONT_EXIT_GATE_CENTRE_W_M, dtype=float),
+        normal_w=np.array(FRONT_EXIT_GATE_NORMAL_W, dtype=float),
+        width_m=FRONT_EXIT_GATE_WIDTH_M,
+        height_m=FRONT_EXIT_GATE_HEIGHT_M,
+    )

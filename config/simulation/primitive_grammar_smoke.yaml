@@ -17,7 +17,9 @@ grammar:
     method: deterministic_pseudo_trim
     airspeed_m_s: [7.0]
     flight_path_angle_rad: [0.0]
-    altitude_m: [1.0]
+    altitude_m: [1.55]
+    x_w_m: 1.3
+    y_w_m: 2.0
     heading_rad: 0.0
     turn_rate_rad_s: 0.0
     command_rad: [0.0, 0.0, 0.0]
@@ -38,20 +40,21 @@ grammar:
 entry_condition:
   min_airspeed_m_s: 3.0
   max_airspeed_m_s: 12.0
-  min_altitude_m: 0.2
-  max_altitude_m: 5.0
+  min_altitude_m: 0.4
+  max_altitude_m: 3.5
   max_abs_bank_rad: 0.8
   max_abs_pitch_rad: 0.8
 safety_limits:
-  x_min_m: -10.0
-  x_max_m: 10.0
-  y_min_m: -5.0
-  y_max_m: 5.0
-  z_min_m: 0.1
-  z_max_m: 5.0
+  x_min_m: 1.2
+  x_max_m: 6.6
+  y_min_m: 0.0
+  y_max_m: 4.4
+  z_min_m: 0.4
+  z_max_m: 3.5
   max_abs_bank_rad: 1.0
-  max_abs_angle_of_attack_rad: 0.8
-  max_abs_command_rad: 0.6
+  max_abs_angle_of_attack_rad: 0.3141592653589793
+  max_abs_command_rad: 0.4031710572106901
 notes:
   - This smoke grammar produces a small deterministic list for interface tests.
   - It is not a dense primitive library or validation result.
+  - The operating point starts inside the measured launch gate, and safety limits use the true safe arena.

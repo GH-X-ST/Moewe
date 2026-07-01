@@ -194,6 +194,8 @@ def generate_primitives(
             TrimSpec(
                 airspeed_m_s=float(airspeed),
                 flight_path_angle_rad=float(gamma),
+                x_w_m=float(op.x_w_m),
+                y_w_m=float(op.y_w_m),
                 altitude_m=float(altitude),
                 heading_rad=float(op.heading_rad),
                 turn_rate_rad_s=float(op.turn_rate_rad_s),

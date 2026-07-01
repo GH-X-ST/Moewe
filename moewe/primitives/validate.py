@@ -7,8 +7,8 @@ from hashlib import sha256
 
 import numpy as np
 
-from moewe.sim.actuator import ActuatorModel
-from moewe.sim.glider_model import GliderModel
+from moewe.sim.actuator import ActuatorModel, NAUSICAA_MAX_COMMAND_ABS_RAD
+from moewe.sim.glider_model import GliderModel, NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD
 from moewe.sim.state import FlightState, STATE_SIZE
 from moewe.tasks.gate import GateTraversalTask
 
@@ -64,8 +64,8 @@ class AcceptanceThresholds:
     """Transparent primitive retention thresholds for smoke validation."""
 
     min_safety_margin_m: float = 0.0
-    max_angle_of_attack_rad: float = 0.8
-    max_command_abs_rad: float = 0.6
+    max_angle_of_attack_rad: float = NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD
+    max_command_abs_rad: float = NAUSICAA_MAX_COMMAND_ABS_RAD
     min_terminal_specific_energy_change_j_kg: float = -10.0
     min_terminal_specific_energy_margin_j_kg: float | None = None
 

@@ -2,7 +2,33 @@ from __future__ import annotations
 
 import numpy as np
 
-from moewe.sim.glider_model import EmpiricalCorrectionConfig, nominal_glider
+from moewe.sim.glider_model import (
+    EmpiricalCorrectionConfig,
+    NAUSICAA_FUSELAGE_DRAG_AREA_M2,
+    NAUSICAA_HTAIL_CHORD_M,
+    NAUSICAA_HTAIL_EFFICIENCY,
+    NAUSICAA_HTAIL_ROOT_LE_B_M,
+    NAUSICAA_HTAIL_SPAN_M,
+    NAUSICAA_INERTIA_B_KG_M2,
+    NAUSICAA_INERTIA_DIAGONAL_KG_M2,
+    NAUSICAA_MASS_KG,
+    NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD,
+    NAUSICAA_TAIL_CD0,
+    NAUSICAA_TOTAL_WING_DIHEDRAL_RAD,
+    NAUSICAA_VTAIL_CHORD_M,
+    NAUSICAA_VTAIL_EFFICIENCY,
+    NAUSICAA_VTAIL_ROOT_LE_B_M,
+    NAUSICAA_VTAIL_HEIGHT_M,
+    NAUSICAA_WING_ALPHA0_RAD,
+    NAUSICAA_WING_AREA_M2,
+    NAUSICAA_WING_CHORD_M,
+    NAUSICAA_WING_CD0,
+    NAUSICAA_WING_DIHEDRAL_RAD,
+    NAUSICAA_WING_EFFICIENCY,
+    NAUSICAA_WING_ROOT_LE_B_M,
+    NAUSICAA_WING_SPAN_M,
+    nominal_glider,
+)
 from moewe.sim.state import FlightState
 from moewe.sim.updraft import AnnularUpdraft, FanUpdraft
 
@@ -15,6 +41,64 @@ def _state(velocity_b: np.ndarray) -> FlightState:
         rates_b_rad_s=np.zeros(3),
         surfaces_rad=np.zeros(3),
     )
+
+
+def test_nominal_glider_uses_nausicaa_design_constants() -> None:
+    model = nominal_glider(enable_corrections=False)
+    surface_names = np.asarray(model.strips.surface_name)
+
+    assert model.mass_kg == NAUSICAA_MASS_KG
+    np.testing.assert_allclose(model.inertia_b_kg_m2, NAUSICAA_INERTIA_B_KG_M2)
+    np.testing.assert_allclose(np.diag(model.inertia_b_kg_m2), NAUSICAA_INERTIA_DIAGONAL_KG_M2)
+    assert model.s_ref_m2 == NAUSICAA_WING_AREA_M2
+    assert model.b_ref_m == NAUSICAA_WING_SPAN_M
+    assert model.c_ref_m == NAUSICAA_WING_CHORD_M
+    assert model.drag_area_m2 == NAUSICAA_FUSELAGE_DRAG_AREA_M2
+
+    wing = surface_names == "wing"
+    horizontal_tail = surface_names == "horizontal_tail"
+    vertical_tail = surface_names == "vertical_tail"
+    np.testing.assert_allclose(
+        model.strips.r_strip_b_m[wing, 0],
+        NAUSICAA_WING_ROOT_LE_B_M[0] - 0.25 * NAUSICAA_WING_CHORD_M,
+    )
+    np.testing.assert_allclose(
+        model.strips.r_strip_b_m[horizontal_tail, 0],
+        NAUSICAA_HTAIL_ROOT_LE_B_M[0] - 0.25 * NAUSICAA_HTAIL_CHORD_M,
+    )
+    np.testing.assert_allclose(
+        model.strips.r_strip_b_m[vertical_tail, 0],
+        NAUSICAA_VTAIL_ROOT_LE_B_M[0] - 0.25 * NAUSICAA_VTAIL_CHORD_M,
+    )
+    np.testing.assert_allclose(model.strips.area_m2[wing].sum(), NAUSICAA_WING_AREA_M2)
+    np.testing.assert_allclose(model.strips.chord_m[wing], NAUSICAA_WING_CHORD_M)
+    np.testing.assert_allclose(model.strips.cd0[wing], NAUSICAA_WING_CD0)
+    np.testing.assert_allclose(model.strips.alpha0_rad[wing], NAUSICAA_WING_ALPHA0_RAD)
+    np.testing.assert_allclose(model.strips.efficiency[wing], NAUSICAA_WING_EFFICIENCY)
+    np.testing.assert_allclose(model.strips.chord_m[horizontal_tail], NAUSICAA_HTAIL_CHORD_M)
+    np.testing.assert_allclose(model.strips.cd0[horizontal_tail], NAUSICAA_TAIL_CD0)
+    np.testing.assert_allclose(model.strips.efficiency[horizontal_tail], NAUSICAA_HTAIL_EFFICIENCY)
+    np.testing.assert_allclose(
+        model.strips.area_m2[horizontal_tail].sum(),
+        NAUSICAA_HTAIL_SPAN_M * NAUSICAA_HTAIL_CHORD_M,
+    )
+    np.testing.assert_allclose(model.strips.chord_m[vertical_tail], NAUSICAA_VTAIL_CHORD_M)
+    np.testing.assert_allclose(model.strips.cd0[vertical_tail], NAUSICAA_TAIL_CD0)
+    np.testing.assert_allclose(model.strips.efficiency[vertical_tail], NAUSICAA_VTAIL_EFFICIENCY)
+    np.testing.assert_allclose(
+        model.strips.area_m2[vertical_tail].sum(),
+        NAUSICAA_VTAIL_HEIGHT_M * NAUSICAA_VTAIL_CHORD_M,
+    )
+    np.testing.assert_allclose(2.0 * NAUSICAA_WING_DIHEDRAL_RAD, NAUSICAA_TOTAL_WING_DIHEDRAL_RAD)
+    np.testing.assert_allclose(
+        np.abs(model.strips.normal_b[wing, 1]),
+        np.sin(NAUSICAA_WING_DIHEDRAL_RAD),
+    )
+    np.testing.assert_allclose(
+        model.strips.normal_b[wing, 2],
+        -np.cos(NAUSICAA_WING_DIHEDRAL_RAD),
+    )
+    assert NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD == np.deg2rad(18.0)
 
 
 def test_symmetric_still_air_model_has_near_zero_lateral_loads() -> None:

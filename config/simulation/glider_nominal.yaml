@@ -1,6 +1,6 @@
 schema_version: 0.1
 project_stage: simulation
-status: initial simulation prior
+status: nausicaa_active_as_built_prior
 units:
   length: m
   mass: kg
@@ -12,18 +12,51 @@ frames:
 random_seed: null
 model:
   namespace: moewe.sim.glider_model.nominal_glider
-  evidence_status: engineering_prior_not_final_validation
-  mass_kg: 0.42
-  inertia_diagonal_kg_m2: [0.0022, 0.0140, 0.0155]
-  reference_area_m2: 0.1216
-  reference_span_m: 0.76
-  reference_chord_m: 0.16
-  fuselage_drag_area_m2: 0.006
+  evidence_status: nausicaa_active_mass_properties_and_latency_prior
+  mass_kg: 0.14856
+  inertia_b_kg_m2:
+    - [0.0027026951327610775, 0.0, 0.000023150631199284152]
+    - [0.0, 0.0029875937118918686, 0.0]
+    - [0.000023150631199284152, 0.0, 0.005606240152469395]
+  inertia_diagonal_kg_m2: [0.0027026951327610775, 0.0029875937118918686, 0.005606240152469395]
+  cg_build_m: [0.10550000000000002, 0.0, -0.008037445457381024]
+  reference_area_m2: 0.12606
+  reference_span_m: 0.764
+  reference_chord_m: 0.165
+  fuselage_drag_area_m2: 0.0002448766730377415
+  surface_geometry:
+    wing_root_le_b_m: [0.10550000000000002, 0.0, -0.003462554542618976]
+    horizontal_tail_root_le_b_m: [-0.29775, 0.0, 0.014037445457381024]
+    vertical_tail_root_le_b_m: [-0.31275, 0.0, 0.0030374454573810234]
+    wing_total_dihedral_rad: 0.16196606318381522
+    wing_panel_dihedral_rad: 0.08098303159190761
+    aileron_eta_start: 0.30
+    aileron_eta_end: 0.85
+    horizontal_tail_span_m: 0.364
+    horizontal_tail_chord_m: 0.091
+    vertical_tail_height_m: 0.119
+    vertical_tail_chord_m: 0.059
+  strip_aero:
+    wing_cd0: 0.054
+    tail_cd0: 0.06
+    wing_alpha0_rad: 0.001
+    horizontal_tail_alpha0_rad: -0.05235987755982989
+    wing_efficiency: 0.2542
+    horizontal_tail_efficiency: 0.2418
+    vertical_tail_efficiency: 0.2325
+    operational_alpha_limit_rad: 0.3141592653589793
   empirical_correction:
     enabled_default: true
     coefficient_limit: 0.35
     claim_boundary: bounded_lateral_stability_prior
   actuator_surface_order: [aileron, elevator, rudder]
+  actuator:
+    lower_limits_rad: [-0.32742376767413617, -0.3909537524467298, -0.4031710572106901]
+    upper_limits_rad: [0.32742376767413617, 0.3909537524467298, 0.4031710572106901]
+    time_constant_s: [0.1116139610371975, 0.110121589022133, 0.10122971500671]
+    delay_s: 0.02
 notes:
-  - This file records the initial nominal prior used by the simulator tests.
-  - Values are not final flight-validation evidence.
+  - Mass, CG, and inertia trace to the active Nausicaa mass-properties estimate with 15 g nose ballast.
+  - The full inertia matrix is retained because the off-diagonal x-z product is non-zero.
+  - The actuator envelope is the command-limited calibrated surface range; response constants trace to the latency summary.
+  - Compact strip aerodynamics retain the active calibration scale factors; the full residual replay model is not reimplemented here.

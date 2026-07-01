@@ -1,6 +1,6 @@
 schema_version: 0.1
 project_stage: simulation
-status: initial simulation prior
+status: nausicaa_single_fan_prior
 units:
   length: m
   velocity: m_s
@@ -15,7 +15,7 @@ model:
   residual_gp_default: false
 fans:
   - fan_id: fan_00
-    centre_xy_m: [0.0, 0.0]
+    centre_xy_m: [4.2, 2.4]
     strength_m_s: 3.0
     ring_radius_m: 0.5
     ring_thickness_m: 0.2

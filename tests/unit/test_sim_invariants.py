@@ -9,11 +9,12 @@ from moewe.sim.glider_model import nominal_glider
 from moewe.sim.integrator import IntegratorConfig, simulate_fixed_step
 from moewe.sim.state import FlightState
 from moewe.sim.updraft import AnnularUpdraft, FanUpdraft
+from moewe.tasks import LAUNCH_GATE_NOMINAL_POSITION_W_M, SINGLE_FAN_CENTER_XY_M
 
 
 def _state(velocity_b_m_s: np.ndarray) -> FlightState:
     return FlightState(
-        position_w_m=np.array([0.0, 0.0, 1.0]),
+        position_w_m=np.array(LAUNCH_GATE_NOMINAL_POSITION_W_M),
         euler_rad=np.zeros(3),
         velocity_b_m_s=velocity_b_m_s,
         rates_b_rad_s=np.zeros(3),
@@ -96,14 +97,14 @@ def test_annular_updraft_is_upward_in_world_z() -> None:
 
 def test_short_updraft_rollout_changes_specific_energy() -> None:
     model = nominal_glider()
-    initial = _state(np.array([8.0, 0.0, 0.2]))
-    updraft = AnnularUpdraft.from_fans([FanUpdraft((0.0, 0.0), 3.0, 0.0, 0.5)])
+    initial = _state(np.array([6.0, 0.0, 0.0]))
+    updraft = AnnularUpdraft.from_fans([FanUpdraft(SINGLE_FAN_CENTER_XY_M, 3.0, 0.35, 0.5)])
 
-    still = simulate_fixed_step(initial, np.zeros(3), 20, model=model, config=IntegratorConfig(dt_s=0.01))
+    still = simulate_fixed_step(initial, np.zeros(3), 50, model=model, config=IntegratorConfig(dt_s=0.01))
     rising = simulate_fixed_step(
         initial,
         np.zeros(3),
-        20,
+        50,
         model=model,
         wind_model=updraft,
         config=IntegratorConfig(dt_s=0.01),

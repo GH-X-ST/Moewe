@@ -6,8 +6,15 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from moewe.sim.glider_model import GliderModel
+from moewe.sim.actuator import NAUSICAA_MAX_COMMAND_ABS_RAD
+from moewe.sim.glider_model import GliderModel, NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD
 from moewe.sim.state import FlightState
+from moewe.tasks.scenario import (
+    LAUNCH_GATE_NOMINAL_POSITION_W_M,
+    TRUE_SAFE_X_W_M,
+    TRUE_SAFE_Y_W_M,
+    TRUE_SAFE_Z_W_M,
+)
 
 
 def _finite_tuple(values: tuple[float, ...] | list[float], name: str) -> tuple[float, ...]:
@@ -29,7 +36,9 @@ class OperatingPointSpec:
 
     airspeed_m_s: tuple[float, ...] = (7.0,)
     flight_path_angle_rad: tuple[float, ...] = (0.0,)
-    altitude_m: tuple[float, ...] = (1.0,)
+    altitude_m: tuple[float, ...] = (LAUNCH_GATE_NOMINAL_POSITION_W_M[2],)
+    x_w_m: float = LAUNCH_GATE_NOMINAL_POSITION_W_M[0]
+    y_w_m: float = LAUNCH_GATE_NOMINAL_POSITION_W_M[1]
     heading_rad: float = 0.0
     turn_rate_rad_s: float = 0.0
     command_rad: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -43,8 +52,9 @@ class OperatingPointSpec:
             raise ValueError("airspeed_m_s values must be positive.")
         if any(altitude <= 0.0 for altitude in altitudes):
             raise ValueError("altitude_m values must be positive.")
-        if not np.isfinite(float(self.heading_rad)) or not np.isfinite(float(self.turn_rate_rad_s)):
-            raise ValueError("heading_rad and turn_rate_rad_s must be finite.")
+        finite_scalars = (self.x_w_m, self.y_w_m, self.heading_rad, self.turn_rate_rad_s)
+        if not np.isfinite(finite_scalars).all():
+            raise ValueError("x_w_m, y_w_m, heading_rad, and turn_rate_rad_s must be finite.")
         if np.asarray(self.command_rad, dtype=float).reshape(3).shape != (3,):
             raise ValueError("command_rad must be ordered as [aileron, elevator, rudder].")
         if self.wind_mode not in {"cg", "panel"}:
@@ -110,8 +120,8 @@ class PrimitiveEntryCondition:
 
     min_airspeed_m_s: float = 3.0
     max_airspeed_m_s: float = 12.0
-    min_altitude_m: float = 0.2
-    max_altitude_m: float = 5.0
+    min_altitude_m: float = TRUE_SAFE_Z_W_M[0]
+    max_altitude_m: float = TRUE_SAFE_Z_W_M[1]
     max_abs_bank_rad: float = 0.8
     max_abs_pitch_rad: float = 0.8
 
@@ -149,15 +159,15 @@ class PrimitiveSafetyReport:
 class PrimitiveSafetyLimits:
     """Axis-aligned volume, attitude, angle-of-attack, and command limits."""
 
-    x_min_m: float = -10.0
-    x_max_m: float = 10.0
-    y_min_m: float = -5.0
-    y_max_m: float = 5.0
-    z_min_m: float = 0.1
-    z_max_m: float = 5.0
+    x_min_m: float = TRUE_SAFE_X_W_M[0]
+    x_max_m: float = TRUE_SAFE_X_W_M[1]
+    y_min_m: float = TRUE_SAFE_Y_W_M[0]
+    y_max_m: float = TRUE_SAFE_Y_W_M[1]
+    z_min_m: float = TRUE_SAFE_Z_W_M[0]
+    z_max_m: float = TRUE_SAFE_Z_W_M[1]
     max_abs_bank_rad: float = 1.0
-    max_abs_angle_of_attack_rad: float = 0.8
-    max_abs_command_rad: float = 0.6
+    max_abs_angle_of_attack_rad: float = NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD
+    max_abs_command_rad: float = NAUSICAA_MAX_COMMAND_ABS_RAD
 
     def validate(self) -> None:
         if self.x_min_m >= self.x_max_m:

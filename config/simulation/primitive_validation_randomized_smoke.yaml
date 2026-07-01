@@ -29,8 +29,8 @@ rollout:
   controller_type: pd
 acceptance_thresholds:
   min_safety_margin_m: 0.0
-  max_angle_of_attack_rad: 0.8
-  max_command_abs_rad: 0.6
+  max_angle_of_attack_rad: 0.3141592653589793
+  max_command_abs_rad: 0.4031710572106901
   min_terminal_specific_energy_change_j_kg: -10.0
   min_terminal_specific_energy_margin_j_kg: null
 outputs:

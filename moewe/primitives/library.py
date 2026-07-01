@@ -6,8 +6,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from moewe.sim.actuator import NAUSICAA_MAX_COMMAND_ABS_RAD
+from moewe.sim.glider_model import NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD
 from moewe.sim.randomisation import UniformRange, sample_parameters
 from moewe.sim.updraft import AnnularUpdraft, FanUpdraft
+from moewe.tasks.scenario import SINGLE_FAN_CENTER_XY_M
 
 from .generate import PrimitiveCandidate, generate_primitives
 from .grammar import (
@@ -75,7 +78,7 @@ def dense_smoke_grammar() -> PrimitiveGrammarSpec:
         operating_point=OperatingPointSpec(
             airspeed_m_s=(6.5, 7.0),
             flight_path_angle_rad=(-0.03, 0.0),
-            altitude_m=(0.9, 1.1),
+            altitude_m=(1.45, 1.65),
         ),
         bank_transition=BankTransitionSpec(target_bank_rad=(-0.3, -0.15, 0.0, 0.15, 0.3), duration_s=0.2),
         pitch_pulse=PitchPulseSpec(delta_pitch_rad=(-0.08, -0.04, 0.0, 0.04, 0.08), duration_s=0.2),
@@ -224,9 +227,9 @@ class ValidationLadderSpec(StructuredDesignMatrixSpec):
 
 def _default_thresholds() -> AcceptanceThresholds:
     return AcceptanceThresholds(
-        min_safety_margin_m=-10.0,
-        max_angle_of_attack_rad=10.0,
-        max_command_abs_rad=10.0,
+        min_safety_margin_m=0.0,
+        max_angle_of_attack_rad=NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD,
+        max_command_abs_rad=NAUSICAA_MAX_COMMAND_ABS_RAD,
         min_terminal_specific_energy_change_j_kg=-100.0,
     )
 
@@ -324,8 +327,8 @@ def _randomised_annular_wind(spec: RandomChallengeMatrixSpec, seed: int, hard: b
     background_range = (-0.10, 0.10) if hard else (-0.04, 0.04)
     sample = sample_parameters(
         {
-            "centre_x_m": UniformRange(-spread, spread),
-            "centre_y_m": UniformRange(-spread, spread),
+            "centre_x_m": UniformRange(SINGLE_FAN_CENTER_XY_M[0] - spread, SINGLE_FAN_CENTER_XY_M[0] + spread),
+            "centre_y_m": UniformRange(SINGLE_FAN_CENTER_XY_M[1] - spread, SINGLE_FAN_CENTER_XY_M[1] + spread),
             "strength_scale": UniformRange(*strength_range),
             "ring_radius_scale": UniformRange(*radius_range),
             "ring_thickness_scale": UniformRange(*thickness_range),
@@ -478,11 +481,25 @@ def _wind_for_case(case: StructuredCase) -> AnnularUpdraft | None:
         0.35,
     )
     thickness = {"thin": 0.08, "diffuse": 0.18, "random_hard": 0.14}.get(case.ring_thickness_bin, 0.12)
-    centre_x = {"upstream": -0.25, "downstream": 0.25, "gate_centred": 0.0}.get(
+    centre_x = {
+        "upstream": SINGLE_FAN_CENTER_XY_M[0] - 0.6,
+        "upstream_or_gate": SINGLE_FAN_CENTER_XY_M[0] - 0.3,
+        "upstream_and_gate": SINGLE_FAN_CENTER_XY_M[0] - 0.3,
+        "downstream": SINGLE_FAN_CENTER_XY_M[0] + 0.6,
+        "gate_centred": SINGLE_FAN_CENTER_XY_M[0],
+        "centred_around_gate": SINGLE_FAN_CENTER_XY_M[0],
+        "fixed": SINGLE_FAN_CENTER_XY_M[0],
+    }.get(
         case.updraft_longitudinal_relation,
-        0.0,
+        SINGLE_FAN_CENTER_XY_M[0],
     )
-    centre_y = -0.12 if "left" in case.updraft_lateral_relation else 0.12 if "right" in case.updraft_lateral_relation else 0.0
+    centre_y = (
+        SINGLE_FAN_CENTER_XY_M[1] - 0.12
+        if "left" in case.updraft_lateral_relation
+        else SINGLE_FAN_CENTER_XY_M[1] + 0.12
+        if "right" in case.updraft_lateral_relation
+        else SINGLE_FAN_CENTER_XY_M[1]
+    )
     if case.case_set == RANDOM_CHALLENGE_CASE_SET and case.seed is not None:
         challenge_spec = RandomChallengeMatrixSpec(seed=case.seed)
         return _randomised_annular_wind(challenge_spec, seed=case.seed, hard="hard" in case.name)

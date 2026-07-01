@@ -7,6 +7,24 @@ from math import ceil
 
 import numpy as np
 
+NAUSICAA_SURFACE_LOWER_LIMITS_RAD = (
+    -0.32742376767413617,
+    -0.3909537524467298,
+    -0.4031710572106901,
+)
+NAUSICAA_SURFACE_UPPER_LIMITS_RAD = (
+    0.32742376767413617,
+    0.3909537524467298,
+    0.4031710572106901,
+)
+NAUSICAA_MAX_COMMAND_ABS_RAD = max(NAUSICAA_SURFACE_UPPER_LIMITS_RAD)
+NAUSICAA_ACTUATOR_TIME_CONSTANT_S = (
+    0.1116139610371975,
+    0.110121589022133,
+    0.10122971500671,
+)
+NAUSICAA_COMMAND_DELAY_S = 0.02
+
 
 def _surface_vector(value: np.ndarray | tuple[float, float, float]) -> np.ndarray:
     return np.asarray(value, dtype=float).reshape(3)
@@ -16,10 +34,10 @@ def _surface_vector(value: np.ndarray | tuple[float, float, float]) -> np.ndarra
 class ActuatorConfig:
     """Actuator limits, optional lattice, fixed delay, and first-order response."""
 
-    lower_limits_rad: tuple[float, float, float] = (-0.6, -0.6, -0.6)
-    upper_limits_rad: tuple[float, float, float] = (0.6, 0.6, 0.6)
-    time_constant_s: tuple[float, float, float] = (0.06, 0.06, 0.06)
-    delay_s: float = 0.0
+    lower_limits_rad: tuple[float, float, float] = NAUSICAA_SURFACE_LOWER_LIMITS_RAD
+    upper_limits_rad: tuple[float, float, float] = NAUSICAA_SURFACE_UPPER_LIMITS_RAD
+    time_constant_s: tuple[float, float, float] = NAUSICAA_ACTUATOR_TIME_CONSTANT_S
+    delay_s: float = NAUSICAA_COMMAND_DELAY_S
     lattice_step_rad: float | None = None
 
     def validate(self) -> None:

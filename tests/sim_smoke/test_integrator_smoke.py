@@ -7,13 +7,14 @@ from moewe.sim.glider_model import nominal_glider
 from moewe.sim.integrator import IntegratorConfig, simulate_fixed_step
 from moewe.sim.state import FlightState
 from moewe.sim.updraft import AnnularUpdraft, FanUpdraft
+from moewe.tasks import LAUNCH_GATE_NOMINAL_POSITION_W_M, SINGLE_FAN_CENTER_XY_M
 
 
 def _initial_state() -> FlightState:
     return FlightState(
-        position_w_m=np.array([0.0, 0.0, 1.0]),
+        position_w_m=np.array(LAUNCH_GATE_NOMINAL_POSITION_W_M),
         euler_rad=np.zeros(3),
-        velocity_b_m_s=np.array([8.0, 0.0, 0.4]),
+        velocity_b_m_s=np.array([6.0, 0.0, 0.0]),
         rates_b_rad_s=np.zeros(3),
         surfaces_rad=np.zeros(3),
     )
@@ -36,14 +37,14 @@ def test_updraft_crossing_changes_energy_in_expected_direction() -> None:
     model = nominal_glider()
     config = IntegratorConfig(dt_s=0.01)
     updraft = AnnularUpdraft.from_fans(
-        [FanUpdraft((0.0, 0.0), strength_m_s=3.0, ring_radius_m=0.0, ring_thickness_m=0.5)]
+        [FanUpdraft(SINGLE_FAN_CENTER_XY_M, strength_m_s=3.0, ring_radius_m=0.35, ring_thickness_m=0.5)]
     )
 
-    still = simulate_fixed_step(_initial_state(), np.zeros(3), 20, model=model, config=config)
+    still = simulate_fixed_step(_initial_state(), np.zeros(3), 50, model=model, config=config)
     rising = simulate_fixed_step(
         _initial_state(),
         np.zeros(3),
-        20,
+        50,
         model=model,
         wind_model=updraft,
         config=config,

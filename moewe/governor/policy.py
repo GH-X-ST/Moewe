@@ -31,7 +31,7 @@ class OnlineGovernorConfig:
     require_recoverable_entry: bool = True
     require_recoverable_exit: bool = True
     reject_forbidden_exit: bool = True
-    min_safety_margin_m: float = -10.0
+    min_safety_margin_m: float = 0.0
     min_terminal_specific_energy_change_j_kg: float = -100.0
     prefer_terminal_success: bool = True
 

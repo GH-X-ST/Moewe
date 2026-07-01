@@ -19,8 +19,8 @@ pd:
   altitude_p: 0.0
   vertical_speed_p: 0.0
 command_limits_rad:
-  lower: [-0.6, -0.6, -0.6]
-  upper: [0.6, 0.6, 0.6]
+  lower: [-0.32742376767413617, -0.3909537524467298, -0.4031710572106901]
+  upper: [0.32742376767413617, 0.3909537524467298, 0.4031710572106901]
 notes:
   - This is a transparent local stabiliser for future ablations.
   - It is not tuned as a final benchmark controller.

@@ -5,7 +5,7 @@ governor:
   require_recoverable_entry: true
   require_recoverable_exit: true
   reject_forbidden_exit: true
-  min_safety_margin_m: -10.0
+  min_safety_margin_m: 0.0
   min_terminal_specific_energy_change_j_kg: -100.0
   prefer_terminal_success: true
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 class ReturnabilityGraphConfig:
     """Transparent thresholds for smoke-scale returnability set construction."""
 
-    min_terminal_safety_margin_m: float = -10.0
+    min_terminal_safety_margin_m: float = 0.0
     min_terminal_specific_energy_change_j_kg: float = -100.0
     forbidden_reason_tokens: tuple[str, ...] = (
         "non_finite_state",

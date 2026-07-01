@@ -7,6 +7,10 @@ from typing import Protocol
 
 import numpy as np
 
+from moewe.sim.actuator import (
+    NAUSICAA_SURFACE_LOWER_LIMITS_RAD,
+    NAUSICAA_SURFACE_UPPER_LIMITS_RAD,
+)
 from moewe.sim.state import FlightState
 
 
@@ -18,8 +22,8 @@ def _command_vector(value: np.ndarray | tuple[float, float, float] | list[float]
 class CommandLimits:
     """Command limits for aileron, elevator, and rudder in radians."""
 
-    lower_rad: tuple[float, float, float] = (-0.6, -0.6, -0.6)
-    upper_rad: tuple[float, float, float] = (0.6, 0.6, 0.6)
+    lower_rad: tuple[float, float, float] = NAUSICAA_SURFACE_LOWER_LIMITS_RAD
+    upper_rad: tuple[float, float, float] = NAUSICAA_SURFACE_UPPER_LIMITS_RAD
 
     def __post_init__(self) -> None:
         lower = _command_vector(self.lower_rad)

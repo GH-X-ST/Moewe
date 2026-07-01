@@ -1,7 +1,7 @@
 schema_version: 0.1
 project_stage: scenarios
 task_id: gate_traversal_random_updraft
-status: initial_scenario_example
+status: nausicaa_reality_contract
 units:
   length: m
   angle: rad
@@ -14,30 +14,30 @@ random_seed: 20260701
 task:
   type: gate_traversal
   flight_volume:
-    x_min_m: -1.0
-    x_max_m: 6.0
-    y_min_m: -1.5
-    y_max_m: 1.5
-    z_min_m: 0.2
-    z_max_m: 3.0
+    x_min_m: 1.2
+    x_max_m: 6.6
+    y_min_m: 0.0
+    y_max_m: 4.4
+    z_min_m: 0.4
+    z_max_m: 3.5
   gate:
-    centre_w_m: [4.0, 0.0, 1.1]
+    centre_w_m: [6.6, 2.2, 1.95]
     normal_w: [1.0, 0.0, 0.0]
-    width_m: 0.9
-    height_m: 0.6
+    width_m: 4.4
+    height_m: 3.1
   timeout_s: 2.0
-  angle_of_attack_limit_rad: 0.6
+  angle_of_attack_limit_rad: 0.3141592653589793
   required_terminal_specific_energy_j_kg: 0.0
 initial_state:
   sampler: uniform
   state_order: [x, y, z, phi, theta, psi, u, v, w, p, q, r, delta_a, delta_e, delta_r]
-  nominal_vector: [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-  half_width: [0.05, 0.05, 0.05, 0.02, 0.02, 0.02, 0.3, 0.1, 0.1, 0.02, 0.02, 0.02, 0.0, 0.0, 0.0]
+  nominal_vector: [1.3, 2.0, 1.55, 0.0, 0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  half_width: [0.05, 0.08, 0.08, 0.04, 0.04, 0.04, 0.4, 0.15, 0.15, 0.02, 0.02, 0.02, 0.0, 0.0, 0.0]
 wind:
   model: randomized_annular_updraft
   wind_mode: panel
   fan_nominal:
-    centre_xy_m: [2.5, 0.0]
+    centre_xy_m: [4.2, 2.4]
     strength_m_s: 2.5
     ring_radius_m: 0.45
     ring_thickness_m: 0.25
@@ -47,8 +47,8 @@ wind:
     harmonic_sin: []
     fluctuation_std_m_s: 0.1
   randomisation_bounds:
-    centre_x_m: [-0.05, 0.05]
-    centre_y_m: [-0.05, 0.05]
+    centre_x_m: [4.15, 4.25]
+    centre_y_m: [2.35, 2.45]
     strength_scale: [0.8, 1.2]
     ring_radius_scale: [0.85, 1.15]
     ring_thickness_scale: [0.8, 1.25]

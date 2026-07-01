@@ -19,8 +19,8 @@ lqr:
   q_diagonal: [1.0, 1.0, 1.0]
   r_diagonal: [0.1, 0.1, 0.1]
 command_limits_rad:
-  lower: [-0.6, -0.6, -0.6]
-  upper: [0.6, 0.6, 0.6]
+  lower: [-0.32742376767413617, -0.3909537524467298, -0.4031710572106901]
+  upper: [0.32742376767413617, 0.3909537524467298, 0.4031710572106901]
 notes:
   - This initial example uses actuator surface states as a controllable subset.
   - Broader attitude and trajectory LQR designs require later trim and controllability review.

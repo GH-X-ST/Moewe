@@ -34,6 +34,8 @@ from moewe.governor import (
 from moewe.objectives import GateTraversalProposer, LiftExploitationProposer, RecoveryProposer
 from moewe.primitives import PrimitiveLibrary, PrimitiveLibraryCandidate, PrimitiveRolloutConfig, rollout_primitive
 from moewe.returnability import ReturnabilityGraph
+from moewe.sim.actuator import NAUSICAA_MAX_COMMAND_ABS_RAD
+from moewe.sim.glider_model import NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD
 from moewe.tasks import specific_energy_j_kg
 
 FIRST_FULL_SIMULATION_METHODS = (
@@ -78,9 +80,9 @@ class FirstFullSimulationConfig:
     max_duration_s: float = 0.10
     reference_horizon_s: float = 0.30
     wind_mode: str = "panel"
-    local_safety_min_margin_m: float = -10.0
-    local_safety_max_angle_of_attack_rad: float = 10.0
-    local_safety_max_command_abs_rad: float = 10.0
+    local_safety_min_margin_m: float = 0.0
+    local_safety_max_angle_of_attack_rad: float = NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD
+    local_safety_max_command_abs_rad: float = NAUSICAA_MAX_COMMAND_ABS_RAD
     run_command: str | None = None
     tests_status: str | None = None
 

@@ -18,7 +18,9 @@ grammar:
     method: deterministic_pseudo_trim
     airspeed_m_s: [6.5, 7.0]
     flight_path_angle_rad: [-0.03, 0.0]
-    altitude_m: [0.9, 1.1]
+    altitude_m: [1.45, 1.65]
+    x_w_m: 1.3
+    y_w_m: 2.0
     command_rad: [0.0, 0.0, 0.0]
     wind_mode: panel
   bank_transition:
@@ -44,9 +46,9 @@ rollout:
   dt_s: 0.01
   max_duration_s: 0.08
 acceptance_thresholds:
-  min_safety_margin_m: -10.0
-  max_angle_of_attack_rad: 10.0
-  max_command_abs_rad: 10.0
+  min_safety_margin_m: 0.0
+  max_angle_of_attack_rad: 0.3141592653589793
+  max_command_abs_rad: 0.4031710572106901
   min_terminal_specific_energy_change_j_kg: -100.0
   min_terminal_specific_energy_margin_j_kg: null
 outputs:
@@ -54,4 +56,4 @@ outputs:
 notes:
   - This expands interface candidates for structured library design cases; it does not run a dense campaign automatically.
   - Random challenge cases are excluded from primitive-library construction.
-  - Airframe and actuator sensitivity checks are deferred until parameter transforms are explicitly reviewed.
+  - The command and angle thresholds follow the Nausicaa calibrated physical envelope.

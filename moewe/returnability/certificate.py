@@ -68,7 +68,7 @@ class ReturnabilityThresholds:
 
     p_return_min: float = 1.0
     p_hard_max: float = 0.0
-    margin_min: float = -10.0
+    margin_min: float = 0.0
     require_actuator_feasible: bool = True
 
     def __post_init__(self) -> None:

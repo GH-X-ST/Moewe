@@ -21,9 +21,18 @@ from moewe.baselines import (
 )
 from moewe.governor import GovernorDecision, OnlineGovernor
 from moewe.primitives import PrimitiveLibrary, PrimitiveRolloutConfig, rollout_primitive
+from moewe.sim.glider_model import NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD
 from moewe.sim.state import FlightState
 from moewe.sim.updraft import AnnularUpdraft, FanUpdraft
-from moewe.tasks import FlightVolume, GatePlane, GateTraversalTask, specific_energy_j_kg
+from moewe.tasks import (
+    FOUR_FAN_CENTERS_XY_M,
+    LAUNCH_GATE_NOMINAL_POSITION_W_M,
+    SINGLE_FAN_CENTER_XY_M,
+    TRUE_SAFE_FLIGHT_VOLUME,
+    GateTraversalTask,
+    front_exit_gate,
+    specific_energy_j_kg,
+)
 
 SELECTOR_GOVERNOR = "governor"
 SELECTOR_UNFILTERED = "unfiltered"
@@ -643,12 +652,12 @@ def _sample_factors(family: str, seed: int) -> dict[str, object]:
         "seed": int(seed),
         "source_count": source_count,
         "initial_position_w_m": [
-            _uniform(rng, -0.05, 0.05),
-            _uniform(rng, -0.08, 0.08),
-            1.0 + _uniform(rng, -0.08, 0.08),
+            LAUNCH_GATE_NOMINAL_POSITION_W_M[0] + _uniform(rng, -0.05, 0.05),
+            LAUNCH_GATE_NOMINAL_POSITION_W_M[1] + _uniform(rng, -0.08, 0.08),
+            LAUNCH_GATE_NOMINAL_POSITION_W_M[2] + _uniform(rng, -0.08, 0.08),
         ],
         "initial_velocity_b_m_s": [
-            7.0 + _uniform(rng, -0.40, 0.40),
+            6.0 + _uniform(rng, -0.40, 0.40),
             _uniform(rng, -0.15, 0.15),
             _uniform(rng, -0.15, 0.15),
         ],
@@ -674,29 +683,29 @@ def _family_spec(family: str) -> dict[str, object]:
     specs = {
         "weak_random_single_source": {
             "source_count": 1,
-            "centre_x_m": 2.40,
-            "centre_y_m": 0.00,
+            "centre_x_m": SINGLE_FAN_CENTER_XY_M[0],
+            "centre_y_m": SINGLE_FAN_CENTER_XY_M[1],
             "strength_m_s": 0.70,
             "strength_scale": (0.80, 1.10),
         },
         "hard_random_single_source": {
             "source_count": 1,
-            "centre_x_m": 2.60,
-            "centre_y_m": 0.00,
+            "centre_x_m": SINGLE_FAN_CENTER_XY_M[0],
+            "centre_y_m": SINGLE_FAN_CENTER_XY_M[1],
             "strength_m_s": 1.00,
             "strength_scale": (1.00, 1.50),
         },
         "random_two_source": {
             "source_count": 2,
-            "centre_x_m": 2.80,
-            "centre_y_m": 0.00,
+            "centre_x_m": SINGLE_FAN_CENTER_XY_M[0],
+            "centre_y_m": SINGLE_FAN_CENTER_XY_M[1],
             "strength_m_s": 0.75,
             "strength_scale": (0.90, 1.35),
         },
         "random_four_source": {
             "source_count": 4,
-            "centre_x_m": 3.00,
-            "centre_y_m": 0.00,
+            "centre_x_m": SINGLE_FAN_CENTER_XY_M[0],
+            "centre_y_m": SINGLE_FAN_CENTER_XY_M[1],
             "strength_m_s": 0.55,
             "strength_scale": (0.90, 1.30),
         },
@@ -712,8 +721,8 @@ def _fan_centres(
 ) -> list[list[float]]:
     offsets = {
         1: ((0.0, 0.0),),
-        2: ((0.0, -0.18), (0.0, 0.18)),
-        4: ((-0.10, -0.12), (-0.10, 0.12), (0.12, -0.12), (0.12, 0.12)),
+        2: ((-0.6, -0.6), (0.6, 0.6)),
+        4: tuple((x - SINGLE_FAN_CENTER_XY_M[0], y - SINGLE_FAN_CENTER_XY_M[1]) for x, y in FOUR_FAN_CENTERS_XY_M),
     }
     centres: list[list[float]] = []
     for offset_x, offset_y in offsets[source_count]:
@@ -747,22 +756,10 @@ def _wind_from_factors(factors: dict[str, object]) -> AnnularUpdraft:
 
 def _gate_task() -> GateTraversalTask:
     return GateTraversalTask(
-        gate=GatePlane(
-            centre_w_m=np.array([2.0, 0.0, 1.0]),
-            normal_w=np.array([1.0, 0.0, 0.0]),
-            width_m=1.0,
-            height_m=0.8,
-        ),
-        flight_volume=FlightVolume(
-            x_min_m=-1.0,
-            x_max_m=4.0,
-            y_min_m=-1.2,
-            y_max_m=1.2,
-            z_min_m=0.1,
-            z_max_m=3.0,
-        ),
-        timeout_s=1.0,
-        angle_of_attack_limit_rad=0.8,
+        gate=front_exit_gate(),
+        flight_volume=TRUE_SAFE_FLIGHT_VOLUME,
+        timeout_s=2.0,
+        angle_of_attack_limit_rad=NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD,
     )
 
 

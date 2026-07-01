@@ -20,6 +20,40 @@ from .state import FlightState
 
 EPS = 1e-9
 
+NAUSICAA_MASS_KG = 0.14856
+NAUSICAA_INERTIA_B_KG_M2 = np.array(
+    [
+        [0.0027026951327610775, 0.0, 2.3150631199284152e-05],
+        [0.0, 0.0029875937118918686, 0.0],
+        [2.3150631199284152e-05, 0.0, 0.005606240152469395],
+    ],
+    dtype=float,
+)
+NAUSICAA_INERTIA_DIAGONAL_KG_M2 = tuple(float(value) for value in np.diag(NAUSICAA_INERTIA_B_KG_M2))
+NAUSICAA_WING_ROOT_LE_B_M = (0.10550000000000002, 0.0, -0.003462554542618976)
+NAUSICAA_HTAIL_ROOT_LE_B_M = (-0.29775, 0.0, 0.014037445457381024)
+NAUSICAA_VTAIL_ROOT_LE_B_M = (-0.31275, 0.0, 0.0030374454573810234)
+NAUSICAA_WING_SPAN_M = 0.764
+NAUSICAA_WING_CHORD_M = 0.165
+NAUSICAA_WING_AREA_M2 = NAUSICAA_WING_SPAN_M * NAUSICAA_WING_CHORD_M
+NAUSICAA_TOTAL_WING_DIHEDRAL_RAD = float(np.deg2rad(9.28))
+NAUSICAA_WING_DIHEDRAL_RAD = 0.5 * NAUSICAA_TOTAL_WING_DIHEDRAL_RAD
+NAUSICAA_AILERON_ETA_START = 0.30
+NAUSICAA_AILERON_ETA_END = 0.85
+NAUSICAA_HTAIL_SPAN_M = 0.364
+NAUSICAA_HTAIL_CHORD_M = 0.091
+NAUSICAA_VTAIL_HEIGHT_M = 0.119
+NAUSICAA_VTAIL_CHORD_M = 0.059
+NAUSICAA_WING_CD0 = 0.018 * 3.0
+NAUSICAA_TAIL_CD0 = 0.020 * 3.0
+NAUSICAA_WING_ALPHA0_RAD = 0.001
+NAUSICAA_HTAIL_ALPHA0_RAD = float(np.deg2rad(-3.0))
+NAUSICAA_WING_EFFICIENCY = 0.82 * 0.31
+NAUSICAA_HTAIL_EFFICIENCY = 0.78 * 0.31
+NAUSICAA_VTAIL_EFFICIENCY = 0.75 * 0.31
+NAUSICAA_FUSELAGE_DRAG_AREA_M2 = 4.89753346075483e-05 * 5.0
+NAUSICAA_OPERATIONAL_ALPHA_LIMIT_RAD = float(np.deg2rad(18.0))
+
 
 @dataclass(frozen=True)
 class LateralCoefficients:
@@ -248,50 +282,57 @@ class GliderModel:
 
 
 def nominal_glider(enable_corrections: bool = True) -> GliderModel:
-    """Return a conservative small-glider prior for simulation development.
+    """Return the Nausicaa nominal glider plant for simulation development.
 
-    The values are engineering priors, not final paper evidence or system
-    identification results.
+    Mass, inertia, root locations, and primary dimensions trace to the active
+    Nausicaa as-built runtime model with the measured nose-ballast case. The
+    compact strip aerodynamics remain a reduced model boundary.
     """
 
     wing = LiftingSurface(
         name="wing",
-        root_le_b_m=np.array([0.04, 0.0, -0.015]),
-        chord_m=0.16,
-        span_m=0.76,
+        root_le_b_m=np.array(NAUSICAA_WING_ROOT_LE_B_M, dtype=float),
+        chord_m=NAUSICAA_WING_CHORD_M,
+        span_m=NAUSICAA_WING_SPAN_M,
         strip_count=6,
         symmetric=True,
         vertical=False,
-        cd0=0.025,
-        alpha0_rad=np.deg2rad(-1.5),
-        efficiency=0.75,
-        dihedral_rad=np.deg2rad(4.0),
-        control=ControlSurfaceMapping(axis=0, sign=-1.0, eta_start=0.35, eta_end=0.90, chord_fraction=0.30),
+        cd0=NAUSICAA_WING_CD0,
+        alpha0_rad=NAUSICAA_WING_ALPHA0_RAD,
+        efficiency=NAUSICAA_WING_EFFICIENCY,
+        dihedral_rad=NAUSICAA_WING_DIHEDRAL_RAD,
+        control=ControlSurfaceMapping(
+            axis=0,
+            sign=-1.0,
+            eta_start=NAUSICAA_AILERON_ETA_START,
+            eta_end=NAUSICAA_AILERON_ETA_END,
+            chord_fraction=0.30,
+        ),
     )
     horizontal_tail = LiftingSurface(
         name="horizontal_tail",
-        root_le_b_m=np.array([-0.36, 0.0, 0.0]),
-        chord_m=0.09,
-        span_m=0.34,
+        root_le_b_m=np.array(NAUSICAA_HTAIL_ROOT_LE_B_M, dtype=float),
+        chord_m=NAUSICAA_HTAIL_CHORD_M,
+        span_m=NAUSICAA_HTAIL_SPAN_M,
         strip_count=4,
         symmetric=True,
         vertical=False,
-        cd0=0.026,
-        alpha0_rad=np.deg2rad(0.0),
-        efficiency=0.72,
+        cd0=NAUSICAA_TAIL_CD0,
+        alpha0_rad=NAUSICAA_HTAIL_ALPHA0_RAD,
+        efficiency=NAUSICAA_HTAIL_EFFICIENCY,
         control=ControlSurfaceMapping(axis=1, sign=-1.0, eta_start=0.0, eta_end=1.0, chord_fraction=0.30),
     )
     vertical_tail = LiftingSurface(
         name="vertical_tail",
-        root_le_b_m=np.array([-0.37, 0.0, 0.0]),
-        chord_m=0.07,
-        span_m=0.12,
+        root_le_b_m=np.array(NAUSICAA_VTAIL_ROOT_LE_B_M, dtype=float),
+        chord_m=NAUSICAA_VTAIL_CHORD_M,
+        span_m=NAUSICAA_VTAIL_HEIGHT_M,
         strip_count=4,
         symmetric=False,
         vertical=True,
-        cd0=0.026,
+        cd0=NAUSICAA_TAIL_CD0,
         alpha0_rad=0.0,
-        efficiency=0.70,
+        efficiency=NAUSICAA_VTAIL_EFFICIENCY,
         control=ControlSurfaceMapping(axis=2, sign=1.0, eta_start=0.0, eta_end=1.0, chord_fraction=0.35),
     )
     strips = build_strip_geometry((wing, horizontal_tail, vertical_tail))
@@ -301,12 +342,12 @@ def nominal_glider(enable_corrections: bool = True) -> GliderModel:
         else EmpiricalCorrectionConfig(enabled=False)
     )
     return GliderModel(
-        mass_kg=0.42,
-        inertia_b_kg_m2=np.diag([0.0022, 0.0140, 0.0155]),
-        s_ref_m2=0.76 * 0.16,
-        b_ref_m=0.76,
-        c_ref_m=0.16,
-        drag_area_m2=0.006,
+        mass_kg=NAUSICAA_MASS_KG,
+        inertia_b_kg_m2=NAUSICAA_INERTIA_B_KG_M2.copy(),
+        s_ref_m2=NAUSICAA_WING_AREA_M2,
+        b_ref_m=NAUSICAA_WING_SPAN_M,
+        c_ref_m=NAUSICAA_WING_CHORD_M,
+        drag_area_m2=NAUSICAA_FUSELAGE_DRAG_AREA_M2,
         strips=strips,
         correction=correction,
     )
