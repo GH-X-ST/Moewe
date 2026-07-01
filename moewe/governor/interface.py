@@ -295,7 +295,7 @@ class GovernorDecisionRecord:
 
 
 class ManoeuvrePrimitiveGovernor:
-    """Roadmap-facing wrapper over the existing online governor."""
+    """Decision interface over the existing online governor."""
 
     def __init__(
         self,

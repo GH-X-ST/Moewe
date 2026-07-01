@@ -40,7 +40,7 @@ _scratch/
 _tmp/
 local/
 scratch/
-private/
+local_only/
 work/
 
 # Generated outputs and large artifacts

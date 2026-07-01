@@ -291,8 +291,8 @@ def test_scaffold_only_methods_are_excluded_from_performance_records(
 
     assert report.record_count == 1
     assert report.methods == ("governor",)
-    assert "open_loop_diagnostic" in report.method_capability_audit["excluded_scaffold_methods"]
-    assert "wind_aware_guidance" in report.method_capability_audit["excluded_scaffold_methods"]
+    assert "open_loop_diagnostic" in report.method_capability_summary["excluded_scaffold_methods"]
+    assert "wind_aware_guidance" in report.method_capability_summary["excluded_scaffold_methods"]
     assert all(record.selector_name not in {"open_loop_diagnostic", "wind_aware_guidance"} for record in report.records)
     summary = json.loads((external_output_root / "run" / "summary_by_method.json").read_text(encoding="utf-8"))
     paired = summary["paired_comparisons"]["governor_vs_ungoverned_same_case_success_delta"]

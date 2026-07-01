@@ -164,7 +164,7 @@ class FirstFullSimulationReport:
     config: FirstFullSimulationConfig
     output_dir: Path
     records: tuple[RandomUpdraftChallengeMethodRecord, ...]
-    method_capability_audit: dict[str, object]
+    method_capability_summary: dict[str, object]
     summary_by_method: dict[str, object]
     summary_by_case_family: dict[str, object]
     decision_diagnostics: list[dict[str, object]]
@@ -194,7 +194,7 @@ class FirstFullSimulationReport:
             "case_count": self.case_count,
             "record_count": self.record_count,
             "methods": list(self.methods),
-            "excluded_scaffold_methods": self.method_capability_audit["excluded_scaffold_methods"],
+            "excluded_scaffold_methods": self.method_capability_summary["excluded_scaffold_methods"],
         }
 
 
@@ -254,7 +254,7 @@ def run_first_full_simulation_campaign(
     write_results: bool = False,
     public_repo_root: str | Path | None = None,
 ) -> FirstFullSimulationReport:
-    """Run the first decision-centric full simulation and write private artifacts."""
+    """Run the first decision-centric full simulation and write result artifacts."""
 
     cfg = FirstFullSimulationConfig() if config is None else config
     guard_record = require_first_full_simulation_guards(
@@ -264,7 +264,7 @@ def run_first_full_simulation_campaign(
         public_repo_root=public_repo_root,
     )
     output_path = Path(output_dir).resolve()
-    method_audit = _method_capability_audit(cfg.methods)
+    method_summary = _method_capability_summary(cfg.methods)
     cases = _first_full_simulation_cases(cfg)
     context = _full_simulation_context(library, graph, cfg)
     records: list[RandomUpdraftChallengeMethodRecord] = []
@@ -276,7 +276,7 @@ def run_first_full_simulation_campaign(
     record_tuple = tuple(records)
     _validate_first_full_records(record_tuple, cfg)
     record_dicts = [record.to_record() for record in record_tuple]
-    summary_by_method = _summary_by_method(record_dicts, method_audit)
+    summary_by_method = _summary_by_method(record_dicts, method_summary)
     summary_by_case_family = _summary_by_case_family(record_dicts)
     failure_taxonomy = _failure_taxonomy(record_dicts)
     runtime_summary = _runtime_summary(record_dicts)
@@ -286,7 +286,7 @@ def run_first_full_simulation_campaign(
         guard_record=guard_record,
         output_dir=output_path,
         records=record_dicts,
-        method_audit=method_audit,
+        method_summary=method_summary,
         public_repo_root=public_repo_root,
         partial_run=False,
         stop_reason=None,
@@ -295,7 +295,7 @@ def run_first_full_simulation_campaign(
         config=cfg,
         output_dir=output_path,
         records=record_tuple,
-        method_capability_audit=method_audit,
+        method_capability_summary=method_summary,
         summary_by_method=summary_by_method,
         summary_by_case_family=summary_by_case_family,
         decision_diagnostics=decision_diagnostics,
@@ -305,7 +305,7 @@ def run_first_full_simulation_campaign(
         partial_run=False,
         stop_reason=None,
     )
-    _write_private_outputs(report)
+    _write_run_outputs(report)
     return report
 
 
@@ -844,7 +844,7 @@ def _feature_float(candidate: PrimitiveLibraryCandidate, key: str) -> float | No
     return _optional_float(value)
 
 
-def _method_capability_audit(methods: tuple[str, ...]) -> dict[str, object]:
+def _method_capability_summary(methods: tuple[str, ...]) -> dict[str, object]:
     requested = set(methods)
     records: list[dict[str, object]] = []
     for method in FIRST_FULL_SIMULATION_METHODS:
@@ -949,7 +949,7 @@ def _validate_first_full_records(
 
 def _summary_by_method(
     records: list[dict[str, object]],
-    method_audit: dict[str, object],
+    method_summary: dict[str, object],
 ) -> dict[str, object]:
     methods = _unique_ordered(str(record["method_name"]) for record in records)
     method_summaries = {method: _record_summary(_records_for(records, method_name=method)) for method in methods}
@@ -958,7 +958,7 @@ def _summary_by_method(
         "total_method_case_record_count": len(records),
         "record_count_by_method": {method: method_summaries[method]["record_count"] for method in methods},
         "methods": method_summaries,
-        "excluded_scaffold_methods": method_audit["excluded_scaffold_methods"],
+        "excluded_scaffold_methods": method_summary["excluded_scaffold_methods"],
         "paired_comparisons": paired,
         "governor_vs_ungoverned_same_case_success_delta": paired["governor_vs_ungoverned_same_case_success_delta"],
         "governor_vs_no_returnability_same_case_success_delta": paired[
@@ -1166,7 +1166,7 @@ def _manifest(
     guard_record: dict[str, object],
     output_dir: Path,
     records: list[dict[str, object]],
-    method_audit: dict[str, object],
+    method_summary: dict[str, object],
     public_repo_root: str | Path | None,
     partial_run: bool,
     stop_reason: str | None,
@@ -1197,13 +1197,13 @@ def _manifest(
         "record_count": len(records),
         "record_count_by_method": _histogram(str(record["method_name"]) for record in records),
         "case_family_count_by_method": _case_family_count_by_method(records),
-        "method_capability_audit": method_audit,
+        "method_capability_summary": method_summary,
         "source_version": version,
         "software_versions": {"python": sys.version},
         "output_files": [
             "manifest.json",
             "resolved_config.json",
-            "method_capability_audit.json",
+            "method_capability_summary.json",
             "records.jsonl",
             "summary_by_method.json",
             "summary_by_case_family.json",
@@ -1215,12 +1215,12 @@ def _manifest(
     }
 
 
-def _write_private_outputs(report: FirstFullSimulationReport) -> None:
+def _write_run_outputs(report: FirstFullSimulationReport) -> None:
     output_dir = report.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(output_dir / "manifest.json", report.manifest)
     _write_json(output_dir / "resolved_config.json", report.config.to_record())
-    _write_json(output_dir / "method_capability_audit.json", report.method_capability_audit)
+    _write_json(output_dir / "method_capability_summary.json", report.method_capability_summary)
     _write_json(output_dir / "summary_by_method.json", report.summary_by_method)
     _write_json(output_dir / "summary_by_case_family.json", report.summary_by_case_family)
     _write_json(output_dir / "decision_diagnostics.json", report.decision_diagnostics)
@@ -1249,7 +1249,7 @@ def _run_notes(report: FirstFullSimulationReport) -> str:
         f"- total case count: {report.case_count}",
         f"- total method-case record count: {report.record_count}",
         f"- method list: {', '.join(report.methods)}",
-        f"- scaffold-only methods excluded: {', '.join(report.method_capability_audit['excluded_scaffold_methods'])}",
+        f"- scaffold-only methods excluded: {', '.join(report.method_capability_summary['excluded_scaffold_methods'])}",
         "",
         "## Resolved Configuration",
         "",
@@ -1267,7 +1267,7 @@ def _run_notes(report: FirstFullSimulationReport) -> str:
         "",
         "- This first run is decision-centric simulation evidence, not a manuscript-ready statistical claim.",
         "- The trajectory_tracking_lqr_tvlqr method uses the currently implemented reference-tracking rollout adapter.",
-        "- Scaffold-only methods are listed in the capability audit and excluded from performance summaries.",
+        "- Scaffold-only methods are listed in the method summary and excluded from performance summaries.",
     ]
     return "\n".join(lines) + "\n"
 
