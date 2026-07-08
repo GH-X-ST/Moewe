@@ -2,16 +2,44 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import numpy.typing as npt
 
 
 PARAMETER_ORDER = ("a_ring_m_s", "r_ring_m", "delta_r_m")
-MIN_DELTA_R_M = 1.0e-12
 DEFAULT_OVERLAP_BETA = 0.5
 DEFAULT_OVERLAP_EPSILON = 1.0e-12
+DEFAULT_Z_AXIS_M = (0.2, 0.35, 0.5, 0.75, 1.1, 1.6, 2.2)
+DEFAULT_PROFILE_PARAMETERS = (
+    (4.993168672, 0.306463654579, 0.207643648291),
+    (4.6907967727, 0.338099122176, 0.259135645401),
+    (4.34842187165, 0.504176146278, 0.255494706674),
+    (3.44842281242, 0.434609212945, 0.327207377932),
+    (2.46803251123, 0.40527002812, 0.413003916537),
+    (2.66435258512, 0.427794522449, 0.416874327164),
+    (2.06749412407, 0.401702057616, 0.517533266127),
+)
+
+
+@dataclass(frozen=True)
+class UpdraftConfig:
+    """Height profile and overlap closure for an updraft plug-in."""
+
+    z_axis_m: npt.ArrayLike
+    parameters: npt.ArrayLike
+    overlap_beta: float = DEFAULT_OVERLAP_BETA
+    overlap_epsilon: float = DEFAULT_OVERLAP_EPSILON
+
+
+def default_updraft_config() -> UpdraftConfig:
+    """Return the default annular Gaussian updraft profile."""
+
+    return UpdraftConfig(
+        z_axis_m=DEFAULT_Z_AXIS_M,
+        parameters=DEFAULT_PROFILE_PARAMETERS,
+    )
 
 
 def annular_gaussian(
@@ -22,7 +50,7 @@ def annular_gaussian(
 ) -> np.ndarray:
     """Evaluate the annular Gaussian vertical velocity profile."""
     radius = np.asarray(radius_m, dtype=float)
-    delta = np.maximum(np.asarray(delta_r_m, dtype=float), MIN_DELTA_R_M)
+    delta = np.asarray(delta_r_m, dtype=float)
     return np.asarray(a_ring_m_s, dtype=float) * np.exp(
         -((radius - np.asarray(r_ring_m, dtype=float)) / delta) ** 2
     )
@@ -33,18 +61,15 @@ class AnnularGaussianUpdraft:
     """A configurable annular Gaussian updraft field."""
 
     source_xy_m: npt.ArrayLike
-    z_axis_m: npt.ArrayLike
-    parameters: npt.ArrayLike
     source_strengths: npt.ArrayLike | None = None
-    overlap_beta: float = DEFAULT_OVERLAP_BETA
-    overlap_epsilon: float = DEFAULT_OVERLAP_EPSILON
-    name: str = "annular_gaussian_updraft"
-    source: str = "configured effective-source annular Gaussian updraft"
+    config: UpdraftConfig = field(default_factory=default_updraft_config)
 
     def __post_init__(self) -> None:
         self.source_xy_m = np.asarray(self.source_xy_m, dtype=float)
-        self.z_axis_m = np.asarray(self.z_axis_m, dtype=float)
-        self.parameters = np.asarray(self.parameters, dtype=float)
+        self.z_axis_m = np.asarray(self.config.z_axis_m, dtype=float)
+        self.parameters = np.asarray(self.config.parameters, dtype=float)
+        self.overlap_beta = float(self.config.overlap_beta)
+        self.overlap_epsilon = float(self.config.overlap_epsilon)
 
         if self.source_xy_m.ndim != 2 or self.source_xy_m.shape[1] != 2:
             raise ValueError("source_xy_m must have shape (n_sources, 2).")
@@ -63,6 +88,10 @@ class AnnularGaussianUpdraft:
                 "parameters must have shape "
                 f"{profile_shape} or {field_shape} for {PARAMETER_ORDER}."
             )
+        if np.any(self.parameters[..., 1] < 0.0):
+            raise ValueError("r_ring_m must be non-negative.")
+        if np.any(self.parameters[..., 2] <= 0.0):
+            raise ValueError("delta_r_m must be positive.")
 
         if self.source_strengths is None:
             self.source_strengths = np.ones(n_sources, dtype=float)
@@ -153,3 +182,17 @@ class AnnularGaussianUpdraft:
             source_square_sum[active] + float(self.overlap_epsilon)
         )
         return source_sum / np.maximum(n_eff, 1.0) ** beta
+
+
+def build_updraft(
+    source_xy_m: npt.ArrayLike,
+    source_strengths: npt.ArrayLike | None = None,
+    config: UpdraftConfig | None = None,
+) -> AnnularGaussianUpdraft:
+    """Build a reusable updraft plug-in instance."""
+
+    return AnnularGaussianUpdraft(
+        source_xy_m=source_xy_m,
+        source_strengths=source_strengths,
+        config=default_updraft_config() if config is None else config,
+    )
