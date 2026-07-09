@@ -1,4 +1,4 @@
-"""Mission gate crossing condition for simulation."""
+"""Gate terminal condition for simulation."""
 
 from __future__ import annotations
 
