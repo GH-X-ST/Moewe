@@ -35,25 +35,17 @@ class Gate:
 
         previous_distance = float((previous - center) @ normal)
         current_distance = float((current - center) @ normal)
-        denominator = previous_distance - current_distance
-        if denominator == 0.0:
+        if current_distance <= previous_distance:
+            return False
+        if previous_distance > 0.0 or current_distance < 0.0:
             return False
 
-        ratio = previous_distance / denominator
-        if ratio < 0.0 or ratio > 1.0:
-            return False
-
+        ratio = previous_distance / (previous_distance - current_distance)
         offset = previous + ratio * (current - previous) - center
         return (
             abs(float(offset @ width_axis)) <= 0.5 * self.width_m
             and abs(float(offset @ height_axis)) <= 0.5 * self.height_m
         )
-
-
-def build_gate() -> Gate:
-    """Build a reusable mission gate plug-in instance."""
-
-    return Gate()
 
 
 def _unit(vector: np.ndarray) -> np.ndarray:

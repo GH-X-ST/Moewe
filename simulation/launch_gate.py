@@ -51,11 +51,24 @@ class LaunchGate:
             and _inside(state[9:12], self.body_rate_bounds_rad_s)
         )
 
+    def passed(self, previous_state: State, state: State) -> bool:
+        """Return whether the state enters the launch gate."""
 
-def build_launch_gate() -> LaunchGate:
-    """Build a reusable launch gate plug-in instance."""
+        if self.contains(state):
+            return True
 
-    return LaunchGate()
+        plane_x = 0.5 * sum(self.position_bounds_m[0])
+        previous_x = previous_state[0]
+        current_x = state[0]
+        if current_x <= previous_x or not previous_x <= plane_x <= current_x:
+            return False
+
+        ratio = (plane_x - previous_x) / (current_x - previous_x)
+        crossing = [
+            previous + ratio * (current - previous)
+            for previous, current in zip(previous_state[:12], state[:12])
+        ]
+        return self.contains(crossing)
 
 
 def _inside(values: State, bounds: Bounds3D) -> bool:
