@@ -148,20 +148,6 @@ def fixed_point_kernel(
         kernel = next_kernel
 
 
-def calibration_error(
-    horizon_containment: Sequence[bool],
-    confidence: float = 0.99,
-) -> float:
-    """Return a Hoeffding bound on horizon-containment failure."""
-
-    outcomes = np.asarray(horizon_containment, dtype=bool)
-    failure_rate = 1.0 - float(np.mean(outcomes))
-    radius = np.sqrt(
-        np.log(1.0 / (1.0 - confidence)) / (2.0 * outcomes.size)
-    )
-    return float(min(1.0, failure_rate + radius))
-
-
 def _transition_table(
     table: Sequence[Sequence[Sequence[int]]],
 ) -> TransitionTable:

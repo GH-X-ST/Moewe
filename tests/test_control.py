@@ -6,11 +6,7 @@ from unittest import TestCase
 
 import numpy as np
 
-from control.abstraction import (
-    RecoverabilityObject,
-    calibration_error,
-    sample_abstraction,
-)
+from control.abstraction import RecoverabilityObject, sample_abstraction
 from control.design import BoxGrid, control_lattice
 from control.missions import (
     GateMission,
@@ -26,6 +22,7 @@ from control.policy import (
 )
 from control.recoverability import RecoverabilityMap
 from models.aircraft import Aircraft
+from models.geometry import RigidBodyGeometry, body_to_world
 from simulation.gate import Gate
 from simulation.platform import Platform
 
@@ -35,38 +32,128 @@ STATE_BOUNDS = (
     *((-1.0, 1.0),) * 14,
 )
 MISSION_BOUNDS = ((0.0, 8.0), (0.0, 4.8), (0.4, 3.5))
+TEST_GEOMETRY = RigidBodyGeometry(
+    body_b_m=(
+        (-0.2, -0.4, -0.1),
+        (-0.2, -0.4, 0.1),
+        (-0.2, 0.4, -0.1),
+        (-0.2, 0.4, 0.1),
+        (0.2, -0.4, -0.1),
+        (0.2, -0.4, 0.1),
+        (0.2, 0.4, -0.1),
+        (0.2, 0.4, 0.1),
+    ),
+    contact_b_m=((0.0, -0.1, 0.1), (0.0, 0.1, 0.1)),
+    footprint_b_m=(
+        (-0.2, -0.2, 0.1),
+        (-0.2, 0.2, 0.1),
+        (0.2, -0.2, 0.1),
+        (0.2, 0.2, 0.1),
+    ),
+)
+
+
+class GeometryTests(TestCase):
+    """Verify body-to-world geometry kinematics."""
+
+    def test_rotation_matrix(self) -> None:
+        """Use a proper body-to-world rotation."""
+
+        rotation = body_to_world((0.2, -0.1, 0.3))
+        np.testing.assert_allclose(
+            rotation.T @ rotation,
+            np.eye(3),
+            atol=1.0e-15,
+        )
+        self.assertAlmostEqual(float(np.linalg.det(rotation)), 1.0)
+
+    def test_aircraft_position_kinematics(self) -> None:
+        """Use the same world frame in dynamics and geometry."""
+
+        aircraft = Aircraft()
+        state = np.zeros(15)
+        state[3:6] = (0.2, -0.1, 0.3)
+        state[6:9] = (5.0, 0.4, 0.2)
+        derivative = aircraft(state, np.zeros(3))
+        expected = body_to_world(state[3:6]) @ state[6:9]
+        np.testing.assert_allclose(derivative[:3], expected)
 
 
 class MissionTests(TestCase):
     """Verify gate, landing, and mission safety semantics."""
 
-    def test_gate_and_platform_clearance(self) -> None:
-        """Match controller and simulator clearance events."""
+    def test_gate_occupancy(self) -> None:
+        """Check the swept body against the gate aperture."""
 
         safe = box_safe(MISSION_BOUNDS)
-        gate = GateMission(safe, body_radius_m=0.1)
-        gate_sim = Gate(body_radius_m=0.1)
+        gate = GateMission(safe, geometry=TEST_GEOMETRY, margin_m=0.05)
+        gate_sim = Gate(geometry=TEST_GEOMETRY, margin_m=0.05)
         previous = np.zeros(15)
         current = np.zeros(15)
         previous[:3] = (6.0, 2.2, 1.4)
         current[:3] = (7.0, 2.2, 1.4)
         self.assertTrue(gate.event(previous, current))
         self.assertTrue(gate_sim.passed(previous, current))
+        previous[1] = 2.4
+        current[1] = 2.4
+        self.assertFalse(gate.event(previous, current))
+        self.assertFalse(gate_sim.passed(previous, current))
 
-        landing = LandingMission(safe, body_radius_m=0.1)
-        platform = Platform(body_radius_m=0.1)
-        previous[:3] = (6.0, 2.2, 1.1)
-        current[:3] = (6.0, 2.2, 0.9)
+    def test_landing_footprint(self) -> None:
+        """Check the touchdown footprint against the platform."""
+
+        safe = box_safe(MISSION_BOUNDS)
+        landing = LandingMission(
+            safe,
+            geometry=TEST_GEOMETRY,
+            margin_m=0.05,
+        )
+        platform = Platform(geometry=TEST_GEOMETRY, margin_m=0.05)
+        previous = np.zeros(15)
+        current = np.zeros(15)
+        previous[:3] = (6.0, 2.2, 1.2)
+        current[:3] = (6.0, 2.2, 1.0)
         current[8] = 1.0
         self.assertTrue(landing.event(previous, current))
         self.assertTrue(platform.landed(previous, current))
+
+        current[:3] = (6.0, 2.7, 1.0)
+        self.assertFalse(landing.event(previous, current))
+
+    def test_landing_contact_speed(self) -> None:
+        """Apply touchdown speed limits to first-contact points."""
+
+        safe = box_safe(MISSION_BOUNDS)
+        previous = np.zeros(15)
+        current = np.zeros(15)
+        previous[:3] = (6.0, 2.2, 1.2)
+        current[:3] = (6.0, 2.2, 1.0)
+        previous[[8, 9]] = (0.5, 1.0)
+        current[[8, 9]] = (0.5, 1.0)
+        landing = LandingMission(
+            safe,
+            normal_speed_max_m_s=0.55,
+            geometry=TEST_GEOMETRY,
+        )
+        platform = Platform(
+            normal_speed_max_m_s=0.55,
+            geometry=TEST_GEOMETRY,
+        )
+        self.assertFalse(landing.event(previous, current))
+        self.assertFalse(platform.landed(previous, current))
 
     def test_safe_set_composition(self) -> None:
         """Combine arena and obstacle-clearance predicates."""
 
         arena = box_safe(MISSION_BOUNDS)
+        geometry = RigidBodyGeometry(
+            body_b_m=((0.0, 0.0, 0.0), (0.4, 0.0, 0.0))
+        )
         obstacle = obstacle_safe(
-            lambda point: float(np.linalg.norm(point - np.ones(3))),
+            lambda points: float(
+                np.min(np.linalg.norm(points - np.ones(3), axis=1))
+            ),
+            geometry,
             0.5,
         )
         safe = combine_safe(arena, obstacle)
@@ -99,7 +186,7 @@ class RecoverabilityTests(TestCase):
 
 
 class AbstractionTests(TestCase):
-    """Verify design grids, disturbances, calibration, and persistence."""
+    """Verify empirical abstraction construction."""
 
     def test_grid_lattice_and_time_varying_disturbance(self) -> None:
         """Construct an empirical abstraction from concrete design data."""
@@ -128,7 +215,6 @@ class AbstractionTests(TestCase):
         self.assertEqual(grid.n_cells, 2)
         self.assertEqual(controls.shape, (3, 3))
         self.assertEqual(abstraction.sampled_successors[0][0], (1,))
-        self.assertLess(calibration_error([True] * 1000), 0.05)
 
 
 class PolicyTests(TestCase):
