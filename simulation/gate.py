@@ -21,14 +21,14 @@ class Gate:
     width_axis_w: Vector3 = (0.0, 1.0, 0.0)
     width_m: float = 1.2
     height_m: float = 0.5
+    body_radius_m: float = 0.0
 
     def passed(self, previous_state: State, state: State) -> bool:
         """Return whether the state segment crosses the gate aperture."""
 
         center = np.asarray(self.center_w_m, dtype=float)
-        normal = _unit(np.asarray(self.normal_w, dtype=float))
-        width = np.asarray(self.width_axis_w, dtype=float)
-        width_axis = _unit(width - normal * float(width @ normal))
+        normal = np.asarray(self.normal_w, dtype=float)
+        width_axis = np.asarray(self.width_axis_w, dtype=float)
         height_axis = np.cross(normal, width_axis)
         previous = np.asarray(previous_state[:3], dtype=float)
         current = np.asarray(state[:3], dtype=float)
@@ -43,10 +43,8 @@ class Gate:
         ratio = previous_distance / (previous_distance - current_distance)
         offset = previous + ratio * (current - previous) - center
         return (
-            abs(float(offset @ width_axis)) <= 0.5 * self.width_m
-            and abs(float(offset @ height_axis)) <= 0.5 * self.height_m
+            abs(float(offset @ width_axis))
+            <= 0.5 * self.width_m - self.body_radius_m
+            and abs(float(offset @ height_axis))
+            <= 0.5 * self.height_m - self.body_radius_m
         )
-
-
-def _unit(vector: np.ndarray) -> np.ndarray:
-    return vector / np.linalg.norm(vector)

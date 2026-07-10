@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from math import cos, radians, sin, sqrt
+from math import radians
+
+import numpy as np
+
+from models.state import as_state, sink_rate_down
 
 
 State = Sequence[float]
@@ -22,39 +26,31 @@ class Platform:
     speed_max_m_s: float = 5.0
     roll_max_rad: float = radians(20)
     pitch_bounds_rad: tuple[float, float] = (radians(-10), radians(25))
+    body_radius_m: float = 0.0
 
     def landed(self, previous_state: State, state: State) -> bool:
         """Return whether the state segment touches down on the platform."""
 
+        previous = as_state(previous_state)
+        current = as_state(state)
         platform_z = self.center_w_m[2]
-        previous_z = previous_state[2]
-        current_z = state[2]
-        if (
-            current_z >= previous_z
-            or previous_z < platform_z
-            or current_z > platform_z
-        ):
+        previous_z = previous[2]
+        current_z = current[2]
+        if previous_z <= platform_z or current_z > platform_z:
             return False
 
         ratio = (previous_z - platform_z) / (previous_z - current_z)
-        touchdown = [
-            previous + ratio * (current - previous)
-            for previous, current in zip(previous_state[:9], state[:9])
-        ]
+        touchdown = previous + ratio * (current - previous)
         x_w, y_w = touchdown[:2]
         phi, theta = touchdown[3:5]
-        u_b, v_b, w_b = touchdown[6:9]
-        c_theta = cos(theta)
-        sink_rate = (
-            -sin(theta) * u_b
-            + sin(phi) * c_theta * v_b
-            + cos(phi) * c_theta * w_b
-        )
-        speed = sqrt(u_b * u_b + v_b * v_b + w_b * w_b)
+        sink_rate = sink_rate_down(touchdown)
+        speed = float(np.linalg.norm(touchdown[6:9]))
 
         return (
-            abs(x_w - self.center_w_m[0]) <= 0.5 * self.length_m
-            and abs(y_w - self.center_w_m[1]) <= 0.5 * self.width_m
+            abs(x_w - self.center_w_m[0])
+            <= 0.5 * self.length_m - self.body_radius_m
+            and abs(y_w - self.center_w_m[1])
+            <= 0.5 * self.width_m - self.body_radius_m
             and 0.0 <= sink_rate <= self.sink_rate_max_m_s
             and speed <= self.speed_max_m_s
             and abs(phi) <= self.roll_max_rad

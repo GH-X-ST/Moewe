@@ -6,7 +6,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 
-Bounds3D = tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+Bounds3D = tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]
 Point3D = Sequence[float]
 
 TRACKER_LIMIT_BOUNDS_M: Bounds3D = (

@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from math import radians
 
 
-Bounds3D = tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+Bounds3D = tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]
 State = Sequence[float]
 
 LAUNCH_POSITION_BOUNDS_M: Bounds3D = (
