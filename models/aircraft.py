@@ -17,6 +17,7 @@ AILERON = 0
 ELEVATOR = 1
 RUDDER = 2
 
+_WORLD_AXIS_SIGNS = np.array([1.0, -1.0, -1.0])
 _FLAT_PLATE_AR = np.array(
     [0.167, 0.333, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0, 4.0, 6.0],
     dtype=float,
@@ -299,7 +300,7 @@ class Aircraft:
             EPS,
         )
         surface_dot = (target - surface) / tau
-        position_dot = _flip_world_z(c_wb @ v_b)
+        position_dot = _WORLD_AXIS_SIGNS * (c_wb @ v_b)
         return np.concatenate(
             [position_dot, euler_dot, v_dot_b, omega_dot_b, surface_dot]
         )
@@ -319,7 +320,7 @@ class Aircraft:
 
         x = as_state(state)
         c_wb = _c_wb_numpy(x[3], x[4], x[5])
-        r_cg_w = _flip_world_z(x[:3])
+        r_cg_w = _WORLD_AXIS_SIGNS * x[:3]
         wind_cg_w, _ = _sample_wind(
             wind_model,
             r_cg_w,
@@ -355,7 +356,10 @@ class Aircraft:
         surface = self.clip_control(state[12:15])
         c_wb = _c_wb_numpy(phi, theta, psi)
         c_bw = c_wb.T
-        r_cg_w = _flip_world_z(np.array([x_w, y_w, z_w], dtype=float))
+        r_cg_w = _WORLD_AXIS_SIGNS * np.array(
+            [x_w, y_w, z_w],
+            dtype=float,
+        )
         r_strip_w = r_cg_w + self.strip_table.r_b_m @ c_wb.T
         wind_cg_w, wind_strip_w = _sample_wind(
             wind_model,
@@ -693,19 +697,19 @@ def _sample_wind(
     if wind_model is None:
         return np.zeros(3), np.zeros_like(r_strip_w)
     if callable(wind_model):
-        points_cg = _flip_world_z_rows(r_cg_w.reshape(1, 3))
+        points_cg = r_cg_w.reshape(1, 3) * _WORLD_AXIS_SIGNS
         wind_cg = np.asarray(
             wind_model(points_cg),
             dtype=float,
         ).reshape(-1, 3)[0]
         wind_strip = np.asarray(
-            wind_model(_flip_world_z_rows(r_strip_w)),
+            wind_model(r_strip_w * _WORLD_AXIS_SIGNS),
             dtype=float,
         )
     else:
         wind_cg = np.asarray(wind_model, dtype=float).reshape(3)
         wind_strip = np.broadcast_to(wind_cg, r_strip_w.shape)
-    return _flip_world_z(wind_cg), _flip_world_z_rows(wind_strip)
+    return wind_cg * _WORLD_AXIS_SIGNS, wind_strip * _WORLD_AXIS_SIGNS
 
 
 def _c_wb_numpy(phi: float, theta: float, psi: float) -> np.ndarray:
@@ -765,16 +769,3 @@ def _safe_tan(angle_rad: np.ndarray) -> np.ndarray:
     return np.tan(
         np.clip(angle_rad, -0.5 * pi + 1.0e-6, 0.5 * pi - 1.0e-6)
     )
-
-
-def _flip_world_z(vector_w_up: np.ndarray) -> np.ndarray:
-    return np.array(
-        [vector_w_up[0], vector_w_up[1], -vector_w_up[2]],
-        dtype=float,
-    )
-
-
-def _flip_world_z_rows(rows_w_up: np.ndarray) -> np.ndarray:
-    rows = np.asarray(rows_w_up, dtype=float).copy()
-    rows[:, 2] *= -1.0
-    return rows
