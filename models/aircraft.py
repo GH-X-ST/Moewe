@@ -8,8 +8,8 @@ from math import pi
 import numpy as np
 import numpy.typing as npt
 
+from models.state import G_M_S2, as_state, mechanical_energy_rate
 
-G_M_S2 = 9.81
 DEFAULT_RHO_KG_M3 = 1.225
 EPS = 1.0e-9
 SMOOTH_ABS_EPS = 1.0e-6
@@ -275,7 +275,7 @@ class Aircraft:
     ) -> np.ndarray:
         """Return the derivative of the 15-state aircraft vector."""
 
-        state_array = np.asarray(state, dtype=float).reshape(15)
+        state_array = as_state(state)
         target = self.clip_control(control)
         c_wb, f_aero_b, m_aero_b = self._aero_loads(
             state_array,
@@ -309,6 +309,39 @@ class Aircraft:
 
         values = np.asarray(control, dtype=float).reshape(3)
         return np.clip(values, self.control_lower_rad, self.control_upper_rad)
+
+    def air_data(
+        self,
+        state: npt.ArrayLike,
+        wind_model: object = None,
+    ) -> tuple[float, float]:
+        """Return airspeed and angle of attack."""
+
+        x = as_state(state)
+        c_wb = _c_wb_numpy(x[3], x[4], x[5])
+        r_cg_w = _flip_world_z(x[:3])
+        wind_cg_w, _ = _sample_wind(
+            wind_model,
+            r_cg_w,
+            r_cg_w.reshape(1, 3),
+        )
+        velocity_air_b = x[6:9] - c_wb.T @ wind_cg_w
+        return (
+            float(np.linalg.norm(velocity_air_b)),
+            float(np.arctan2(velocity_air_b[2], velocity_air_b[0])),
+        )
+
+    def energy_rate(
+        self,
+        state: npt.ArrayLike,
+        wind_model: object = None,
+        rho: float = DEFAULT_RHO_KG_M3,
+    ) -> float:
+        """Return the specific mechanical-energy rate."""
+
+        x = as_state(state)
+        derivative = self(x, x[12:15], wind_model, rho)
+        return mechanical_energy_rate(x, derivative)
 
     def _aero_loads(
         self,
