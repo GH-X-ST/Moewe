@@ -7,7 +7,12 @@ from math import radians
 
 import numpy.typing as npt
 
-from models.geometry import RigidBodyGeometry, Vector3, platform_landing
+from models.geometry import (
+    RigidBodyGeometry,
+    Vector3,
+    orthogonal_axes,
+    platform_landing,
+)
 
 
 @dataclass(frozen=True)
@@ -26,16 +31,22 @@ class Platform:
     margin_m: float = 0.0
     geometry: RigidBodyGeometry = RigidBodyGeometry()
 
+    def __post_init__(self) -> None:
+        length, width, _ = orthogonal_axes(
+            self.length_axis_w,
+            self.width_axis_w,
+        )
+        object.__setattr__(self, "length_axis_w", tuple(length))
+        object.__setattr__(self, "width_axis_w", tuple(width))
+
     def landed(
         self,
-        previous_state: npt.ArrayLike,
-        state: npt.ArrayLike,
+        states: npt.ArrayLike,
     ) -> bool:
-        """Return whether the state segment touches down on the platform."""
+        """Return whether realized first contact is admissible."""
 
         return platform_landing(
-            previous_state,
-            state,
+            states,
             self.geometry,
             self.center_w_m,
             self.length_axis_w,

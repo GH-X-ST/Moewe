@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from math import radians
 
-
 Bounds3D = tuple[
     tuple[float, float],
     tuple[float, float],
@@ -70,7 +69,7 @@ class LaunchGate:
         ratio = (plane_x - previous_x) / (current_x - previous_x)
         crossing = [
             previous + ratio * (current - previous)
-            for previous, current in zip(previous_state[:12], state[:12])
+            for previous, current in zip(previous_state[:12], state[:12], strict=True)
         ]
         return self.contains(crossing)
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-
 Bounds3D = tuple[
     tuple[float, float],
     tuple[float, float],
@@ -33,11 +32,14 @@ class ArenaConfig:
     true_safe_bounds_m: Bounds3D = TRUE_SAFE_BOUNDS_M
 
 
+DEFAULT_ARENA_CONFIG = ArenaConfig()
+
+
 @dataclass
 class Arena:
     """Arena plug-in exposing tracker and safety-volume checks."""
 
-    config: ArenaConfig = ArenaConfig()
+    config: ArenaConfig = DEFAULT_ARENA_CONFIG
 
     def contains_tracker_limit(self, point_w_up_m: Point3D) -> bool:
         """Return whether the point or state lies inside tracker limits."""
@@ -50,7 +52,7 @@ class Arena:
         return _contains(point_w_up_m, self.config.true_safe_bounds_m)
 
 
-def build_arena(config: ArenaConfig = ArenaConfig()) -> Arena:
+def build_arena(config: ArenaConfig = DEFAULT_ARENA_CONFIG) -> Arena:
     """Build a reusable arena plug-in instance."""
 
     return Arena(config)

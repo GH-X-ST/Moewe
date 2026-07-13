@@ -6,7 +6,12 @@ from dataclasses import dataclass
 
 import numpy.typing as npt
 
-from models.geometry import RigidBodyGeometry, Vector3, gate_crossing
+from models.geometry import (
+    RigidBodyGeometry,
+    Vector3,
+    gate_crossing,
+    orthogonal_axes,
+)
 
 
 @dataclass(frozen=True)
@@ -21,16 +26,19 @@ class Gate:
     margin_m: float = 0.0
     geometry: RigidBodyGeometry = RigidBodyGeometry()
 
+    def __post_init__(self) -> None:
+        normal, width, _ = orthogonal_axes(self.normal_w, self.width_axis_w)
+        object.__setattr__(self, "normal_w", tuple(normal))
+        object.__setattr__(self, "width_axis_w", tuple(width))
+
     def passed(
         self,
-        previous_state: npt.ArrayLike,
-        state: npt.ArrayLike,
+        states: npt.ArrayLike,
     ) -> bool:
-        """Return whether the state segment crosses the gate aperture."""
+        """Return whether a realized dense trajectory passes the gate."""
 
         return gate_crossing(
-            previous_state,
-            state,
+            states,
             self.geometry,
             self.center_w_m,
             self.normal_w,
