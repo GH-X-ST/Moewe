@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from math import pi, radians
+from math import ceil, pi, radians
 from time import monotonic
 
 import numpy as np
 import numpy.typing as npt
 
-from control.flow import FlowBounds
-from control.interval import Interval, Zonotope
+from control.flow import FlowBounds, SHARED_FLOW_GENERATOR_COUNT
+from control.interval import AffineForm, Interval, Zonotope
 from models.aircraft import (
     G_M_S2,
     SMOOTH_ABS_EPS,
@@ -19,6 +19,9 @@ from models.aircraft import (
     flat_plate_coefficients,
 )
 from models.geometry import RigidBodyGeometry
+
+
+MEASURED_COMMAND_ONSET_DELAY_S = 0.073
 
 
 class TubeCertificationError(RuntimeError):
@@ -32,13 +35,34 @@ def _check_deadline(deadline: float | None) -> None:
 
 @dataclass(frozen=True)
 class FlightDomain:
-    """Hardware and validated aerodynamic-model limits."""
+    """Attitude, rate, actuator-position, and aerodynamic-model limits."""
 
     roll_abs_max_rad: float
     pitch_abs_max_rad: float
     airspeed_bounds_m_s: tuple[float, float]
     alpha_abs_max_rad: float
     body_rate_abs_max_rad_s: float
+
+    def __post_init__(self) -> None:
+        airspeed = tuple(float(value) for value in self.airspeed_bounds_m_s)
+        limits = (
+            float(self.roll_abs_max_rad),
+            float(self.pitch_abs_max_rad),
+            float(self.alpha_abs_max_rad),
+            float(self.body_rate_abs_max_rad_s),
+        )
+        if (
+            len(airspeed) != 2
+            or not np.all(np.isfinite(airspeed))
+            or airspeed[0] <= 0.0
+            or airspeed[0] >= airspeed[1]
+            or not np.all(np.isfinite(limits))
+            or np.any(np.asarray(limits) <= 0.0)
+            or self.pitch_abs_max_rad >= 0.5 * pi
+            or self.alpha_abs_max_rad >= 0.5 * pi
+        ):
+            raise ValueError("flight-domain limits are invalid")
+        object.__setattr__(self, "airspeed_bounds_m_s", airspeed)
 
     def contains(self, state: Interval, aircraft: Aircraft) -> bool:
         """Return whether a state tube lies inside the hard domain."""
@@ -59,7 +83,11 @@ class FlightDomain:
 
 @dataclass(frozen=True)
 class ModelUncertainty:
-    """Frozen flow, parameter, actuator, and residual uncertainty set."""
+    """Flow, mass, moment-reference, actuator, and residual uncertainty.
+
+    The angular-acceleration residual covers certified inertia and remaining
+    centre-of-gravity effects.
+    """
 
     flow: FlowBounds
     density_kg_m3: tuple[float, float]
@@ -68,10 +96,10 @@ class ModelUncertainty:
     force_error_abs_n: npt.ArrayLike
     moment_error_abs_n_m: npt.ArrayLike
     angular_accel_error_abs_rad_s2: npt.ArrayLike
+    moment_reference_offset_abs_m: npt.ArrayLike
     actuator_tau_s: tuple[float, float]
     command_error_abs_rad: npt.ArrayLike
-    command_delay_max_s: float = 0.0
-    command_rate_abs_rad_s: npt.ArrayLike = (0.0, 0.0, 0.0)
+    command_delay_max_s: float = MEASURED_COMMAND_ONSET_DELAY_S
 
     def __post_init__(self) -> None:
         ranges = (
@@ -107,8 +135,11 @@ class ModelUncertainty:
                 "angular_accel_error_abs_rad_s2",
                 self.angular_accel_error_abs_rad_s2,
             ),
+            (
+                "moment_reference_offset_abs_m",
+                self.moment_reference_offset_abs_m,
+            ),
             ("command_error_abs_rad", self.command_error_abs_rad),
-            ("command_rate_abs_rad_s", self.command_rate_abs_rad_s),
         )
         for name, value in fields:
             array = np.asarray(value, dtype=float).reshape(3).copy()
@@ -178,13 +209,15 @@ class BodyTube:
 
 @dataclass(frozen=True)
 class SegmentTube:
-    """Certified successor and inter-sample tube for one control segment."""
+    """State, body, and time-indexed joint-flow tube for one segment."""
 
     initial: Zonotope
     successor: Zonotope
     states: tuple[Interval, ...]
     body: BodyTube
     durations_s: tuple[float, ...] = ()
+    command_history: tuple[Interval, ...] = ()
+    joint_flow: tuple[Zonotope, ...] = ()
 
 
 def body_points(
@@ -203,7 +236,7 @@ def body_points(
 
 @dataclass
 class TubePropagator:
-    """Validated interval propagator for the stripwise aircraft model."""
+    """Validated affine/Taylor propagator for the stripwise aircraft model."""
 
     aircraft: Aircraft
     uncertainty: ModelUncertainty
@@ -213,20 +246,16 @@ class TubePropagator:
     picard_iterations: int = 16
     max_subdivisions: int = 4
     max_generators: int = 120
-    _strip_flow: Interval = field(init=False, repr=False)
-    _center_flow: Interval = field(init=False, repr=False)
+    _joint_flow: Zonotope = field(init=False, repr=False)
+    _flow_shape: tuple[int, int] = field(init=False, repr=False)
     _locations: Interval = field(init=False, repr=False)
     _spans: Interval = field(init=False, repr=False)
     _projection: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         table = self.aircraft.strip_table
-        strip_lower, strip_upper = self.uncertainty.flow.strip_bounds(table.r_b_m)
-        self._strip_flow = Interval(strip_lower, strip_upper)
-        self._center_flow = Interval(
-            self.uncertainty.flow.center_lower_m_s,
-            self.uncertainty.flow.center_upper_m_s,
-        )
+        self._joint_flow = self.uncertainty.flow.joint_zonotope(table.r_b_m)
+        self._flow_shape = (table.r_b_m.shape[0] + 1, 3)
         self._locations = Interval.point(table.r_b_m)
         self._spans = Interval.point(table.span_axis_b)
         self._projection = (
@@ -241,9 +270,11 @@ class TubePropagator:
         dt_s: float,
         stop: Callable[[SegmentTube], bool] | None = None,
         deadline: float | None = None,
+        command_history: tuple[Interval, ...] = (),
     ) -> SegmentTube:
         """Propagate one feedback segment with Picard self-enclosures."""
 
+        history = self._validate_command_history(command_history, dt_s)
         initial_set = (
             initial
             if isinstance(initial, Zonotope)
@@ -256,6 +287,8 @@ class TubePropagator:
         footprint = []
         contact_velocity = []
         durations = []
+        joint_flow = []
+        issued_in_segment: Interval | None = None
 
         def tube() -> SegmentTube:
             return SegmentTube(
@@ -269,16 +302,33 @@ class TubePropagator:
                     tuple(contact_velocity),
                 ),
                 tuple(durations),
+                history,
+                tuple(joint_flow),
             )
 
         step_s = dt_s / self.substeps
         for _ in range(self.substeps):
             _check_deadline(deadline)
-            pieces = self._adaptive_step(state, segment, step_s, 0, deadline)
-            for successor, continuous, duration in pieces:
+            pieces = self._adaptive_step(
+                state,
+                segment,
+                step_s,
+                0,
+                deadline,
+                history,
+                issued_in_segment,
+            )
+            for (
+                successor,
+                continuous,
+                duration,
+                issued_in_segment,
+                flow_slice,
+            ) in pieces:
                 state = successor
                 states.append(continuous)
                 durations.append(duration)
+                joint_flow.append(flow_slice)
                 occupied.append(body_points(continuous, self.geometry.body_b_m))
                 contact.append(body_points(continuous, self.geometry.contact_b_m))
                 footprint.append(body_points(continuous, self.geometry.footprint_b_m))
@@ -300,10 +350,12 @@ class TubePropagator:
         dt_s: float,
         terminal: Callable[[tuple[SegmentTube, ...]], bool] | None = None,
         deadline: float | None = None,
+        initial_command_history: tuple[Interval, ...] = (),
     ) -> tuple[SegmentTube, ...]:
         """Propagate until the final segment certifies its terminal event."""
 
         tubes = []
+        history = self._validate_command_history(initial_command_history, dt_s)
         state = (
             initial
             if isinstance(initial, Zonotope)
@@ -320,9 +372,31 @@ class TubePropagator:
                 ) -> bool:
                     return terminal(prefix + (tube,))
 
-            tube = self.propagate(state, segment, dt_s, stop, deadline)
+            tube = self.propagate(
+                state,
+                segment,
+                dt_s,
+                stop=stop,
+                deadline=deadline,
+                command_history=history,
+            )
             tubes.append(tube)
             state = tube.successor
+            if history:
+                issued = segment.command_box(
+                    tube.states[0],
+                    self.aircraft,
+                    np.zeros(3),
+                )
+                for state_box in tube.states[1:]:
+                    issued = issued.hull(
+                        segment.command_box(
+                            state_box,
+                            self.aircraft,
+                            np.zeros(3),
+                        )
+                    )
+                history = history[1:] + (issued,)
         return tuple(tubes)
 
     def _adaptive_step(
@@ -332,24 +406,44 @@ class TubePropagator:
         dt_s: float,
         depth: int,
         deadline: float | None,
-    ) -> Iterator[tuple[Zonotope, Interval, float]]:
+        command_history: tuple[Interval, ...],
+        issued_in_segment: Interval | None,
+    ) -> Iterator[tuple[Zonotope, Interval, float, Interval, Zonotope]]:
         _check_deadline(deadline)
         try:
-            successor, continuous = self._step(initial, segment, dt_s, deadline)
-            yield successor, continuous, dt_s
+            successor, continuous = self._step(
+                initial,
+                segment,
+                dt_s,
+                deadline,
+                command_history,
+                issued_in_segment,
+            )
+            issued = segment.command_box(
+                continuous,
+                self.aircraft,
+                np.zeros(3),
+            )
+            if issued_in_segment is not None:
+                issued = issued_in_segment.hull(issued)
+            yield successor, continuous, dt_s, issued, self._joint_flow
             return
         except TubeCertificationError:
             if depth >= self.max_subdivisions:
                 raise
             midpoint = initial
+            issued = issued_in_segment
             for piece in self._adaptive_step(
                 initial,
                 segment,
                 0.5 * dt_s,
                 depth + 1,
                 deadline,
+                command_history,
+                issued_in_segment,
             ):
                 midpoint = piece[0]
+                issued = piece[3]
                 yield piece
             yield from self._adaptive_step(
                 midpoint,
@@ -357,6 +451,8 @@ class TubePropagator:
                 0.5 * dt_s,
                 depth + 1,
                 deadline,
+                command_history,
+                issued,
             )
 
     def _step(
@@ -365,14 +461,30 @@ class TubePropagator:
         segment: FeedbackSegment,
         dt_s: float,
         deadline: float | None,
+        command_history: tuple[Interval, ...],
+        issued_in_segment: Interval | None,
     ) -> tuple[Zonotope, Interval]:
         initial_box = initial.interval_hull()
-        command = segment.command_box(
+        flow = AffineForm.from_zonotope(self._joint_flow, self._flow_shape)
+        center_flow = flow[0]
+        strip_flow = flow[1:]
+        issued = segment.command_box(
             initial_box,
             self.aircraft,
-            self._command_error(),
+            np.zeros(3),
         )
-        derivative = self._derivative(initial_box, command)
+        command = self._applied_command_box(
+            issued,
+            command_history,
+            issued_in_segment,
+        )
+        affine_derivative = self._affine_derivative(
+            initial_box,
+            command,
+            center_flow,
+            strip_flow,
+        )
+        derivative = affine_derivative.interval_hull()
         time = Interval(0.0, dt_s)
         continuous = _inflate(
             initial_box.hull(initial_box + time * derivative),
@@ -380,62 +492,131 @@ class TubePropagator:
         )
         for _ in range(self.picard_iterations):
             _check_deadline(deadline)
-            command = segment.command_box(
+            issued = segment.command_box(
                 continuous,
                 self.aircraft,
-                self._command_error(),
+                np.zeros(3),
             )
-            derivative = self._derivative(continuous, command)
+            command = self._applied_command_box(
+                issued,
+                command_history,
+                issued_in_segment,
+            )
+            affine_derivative = self._affine_derivative(
+                continuous,
+                command,
+                center_flow,
+                strip_flow,
+            )
+            derivative = affine_derivative.interval_hull()
             image = initial_box + time * derivative
             if not self.domain.contains(image, self.aircraft):
                 raise TubeCertificationError("reachable tube left the hard domain")
             if image.subset(continuous):
                 successor = self._validated_successor(
                     initial,
-                    derivative,
+                    affine_derivative,
                     dt_s,
                 )
                 return successor, continuous
             continuous = _inflate(continuous.hull(image), 0.25)
         raise TubeCertificationError("Picard enclosure did not converge")
 
-    def _command_error(self) -> np.ndarray:
-        residual = np.asarray(
+    def _validate_command_history(
+        self,
+        command_history: tuple[Interval, ...],
+        dt_s: float,
+    ) -> tuple[Interval, ...]:
+        if not np.isfinite(dt_s) or dt_s <= 0.0:
+            raise ValueError("segment duration must be finite and positive")
+        required = int(ceil(self.uncertainty.command_delay_max_s / dt_s))
+        history = tuple(command_history)
+        if len(history) != required:
+            raise ValueError(
+                f"command delay requires {required} issued command history boxes"
+            )
+        limits = Interval(
+            self.aircraft.control_lower_rad,
+            self.aircraft.control_upper_rad,
+        )
+        for command in history:
+            if command.lower.shape != (3,) or not command.subset(limits):
+                raise ValueError("command history must contain bounded control boxes")
+        return history
+
+    def _applied_command_box(
+        self,
+        issued: Interval,
+        command_history: tuple[Interval, ...],
+        issued_in_segment: Interval | None = None,
+    ) -> Interval:
+        applied = issued
+        for prior in command_history:
+            applied = applied.hull(prior)
+        if self.uncertainty.command_delay_max_s > 0.0 and issued_in_segment is not None:
+            applied = applied.hull(issued_in_segment)
+        error = np.asarray(
             self.uncertainty.command_error_abs_rad,
             dtype=float,
         ).reshape(3)
-        rate = np.asarray(
-            self.uncertainty.command_rate_abs_rad_s,
-            dtype=float,
-        ).reshape(3)
-        return residual + self.uncertainty.command_delay_max_s * rate
+        return (applied + Interval(-error, error)).clip(
+            self.aircraft.control_lower_rad,
+            self.aircraft.control_upper_rad,
+        )
 
     def _validated_successor(
         self,
         initial: Zonotope,
-        derivative: Interval,
+        derivative: AffineForm,
         dt_s: float,
     ) -> Zonotope:
+        """Integrate affine flow directions before sound order reduction."""
+
         delta = derivative * dt_s
         shifted_center = Interval.point(initial.center) + delta.center
-        radius = _up_sum(shifted_center.radius, delta.radius)
+        radius = _up_sum(shifted_center.radius, delta.remainder)
+        initial_count = initial.generators.shape[1]
         generators = np.concatenate(
-            (initial.generators, np.diag(radius)),
+            (initial.generators, delta.generators, np.diag(radius)),
             axis=1,
         )
         successor = Zonotope(
             shifted_center.center,
             generators,
         )
-        return _reduce(successor, self.max_generators)
+        shared_count = min(
+            SHARED_FLOW_GENERATOR_COUNT,
+            delta.generator_count,
+        )
+        protected = tuple(range(initial_count, initial_count + shared_count))
+        return _reduce(successor, self.max_generators, protected)
 
     def _derivative(self, state: Interval, command: Interval) -> Interval:
+        flow = AffineForm.from_zonotope(self._joint_flow, self._flow_shape)
+        return self._affine_derivative(
+            state,
+            command,
+            flow[0],
+            flow[1:],
+        ).interval_hull()
+
+    def _affine_derivative(
+        self,
+        state: Interval,
+        command: Interval,
+        center_flow: AffineForm,
+        strip_flow: AffineForm,
+    ) -> AffineForm:
         if not self.domain.contains(state, self.aircraft):
             raise TubeCertificationError("state tube left the hard domain")
         rotation = _body_to_world(state[3:6])
         velocity = state[6:9]
         omega = state[9:12]
-        force, moment = self._aero_loads(state)
+        force, moment = self._affine_aero_loads_with_flow(
+            state,
+            center_flow,
+            strip_flow,
+        )
         mass = Interval(*self.uncertainty.mass_kg)
         gravity_b = _matvec(
             _transpose(rotation),
@@ -443,9 +624,8 @@ class TubePropagator:
         )
         velocity_dot = force / mass + gravity_b - omega.cross(velocity)
         inertia_omega = omega.affine_map(self.aircraft.inertia_b_kg_m2)
-        angular_dot = (moment - omega.cross(inertia_omega)).affine_map(
-            self.aircraft.inertia_inv_b
-        )
+        angular_load = moment - omega.cross(inertia_omega)
+        angular_dot = (angular_load[None, :] * self.aircraft.inertia_inv_b).sum(axis=1)
         angular_error = np.asarray(
             self.uncertainty.angular_accel_error_abs_rad_s2,
             dtype=float,
@@ -456,7 +636,7 @@ class TubePropagator:
         surface = state[12:15]
         tau = Interval(*self.uncertainty.actuator_tau_s)
         surface_dot = (command - surface) / tau
-        return _join(
+        return _join_affine(
             position_dot,
             euler_dot,
             velocity_dot,
@@ -465,6 +645,33 @@ class TubePropagator:
         )
 
     def _aero_loads(self, state: Interval) -> tuple[Interval, Interval]:
+        flow = AffineForm.from_zonotope(self._joint_flow, self._flow_shape)
+        force, moment = self._affine_aero_loads_with_flow(
+            state,
+            flow[0],
+            flow[1:],
+        )
+        return force.interval_hull(), moment.interval_hull()
+
+    def _aero_loads_with_flow(
+        self,
+        state: Interval,
+        center_flow: AffineForm,
+        strip_flow: AffineForm,
+    ) -> tuple[Interval, Interval]:
+        force, moment = self._affine_aero_loads_with_flow(
+            state,
+            center_flow,
+            strip_flow,
+        )
+        return force.interval_hull(), moment.interval_hull()
+
+    def _affine_aero_loads_with_flow(
+        self,
+        state: Interval,
+        center_flow: AffineForm,
+        strip_flow: AffineForm,
+    ) -> tuple[AffineForm, AffineForm]:
         table = self.aircraft.strip_table
         velocity = state[6:9]
         omega = state[9:12]
@@ -474,37 +681,32 @@ class TubePropagator:
         )
         density = Interval(*self.uncertainty.density_kg_m3)
         scale = Interval(*self.uncertainty.coefficient_scale)
-        air = velocity + omega.cross(self._locations) - self._strip_flow
-        plane = _batch_matvec(self._projection, air)
+        rigid_velocity = velocity + omega.cross(self._locations)
+        air = AffineForm.from_interval(rigid_velocity) - strip_flow
+        plane = (air[:, None, :] * self._projection).sum(axis=2)
         speed = plane.norm(axis=1)
+        speed_box = speed.interval_hull()
         if (
-            np.min(speed.lower) < self.domain.airspeed_bounds_m_s[0]
-            or np.max(speed.upper) > self.domain.airspeed_bounds_m_s[1]
+            np.min(speed_box.lower) < self.domain.airspeed_bounds_m_s[0]
+            or np.max(speed_box.upper) > self.domain.airspeed_bounds_m_s[1]
         ):
             raise TubeCertificationError("strip airspeed left the validated domain")
-        if np.any(plane[:, 0].lower <= 0.0):
+        plane_box = plane.interval_hull()
+        if np.any(plane_box[:, 0].lower <= 0.0):
             raise TubeCertificationError("strip flow left the forward-flight domain")
         drag = -plane / speed[:, None]
-        lift = self._spans.cross(drag)
-        normal_projection = (lift * table.normal_b).sum(axis=1)
-        flipped = -lift
+        lift = drag.cross(-self._spans)
+        lift_box = lift.interval_hull()
+        normal_projection = (lift_box * table.normal_b).sum(axis=1)
         negative = normal_projection.upper < 0.0
         uncertain = (normal_projection.lower <= 0.0) & (normal_projection.upper >= 0.0)
-        lower = np.where(negative[:, None], flipped.lower, lift.lower)
-        upper = np.where(negative[:, None], flipped.upper, lift.upper)
-        lift = Interval(
-            np.where(
-                uncertain[:, None],
-                np.minimum(lower, flipped.lower),
-                lower,
-            ),
-            np.where(
-                uncertain[:, None],
-                np.maximum(upper, flipped.upper),
-                upper,
-            ),
+        lift = lift * np.where(negative, -1.0, 1.0)[:, None]
+        ambiguous = Interval(
+            np.minimum(lift_box.lower, -lift_box.upper),
+            np.maximum(lift_box.upper, -lift_box.lower),
         )
-        alpha = (-(plane * table.normal_b).sum(axis=1)).atan2(plane[:, 0])
+        lift = lift.replace(uncertain, ambiguous)
+        alpha = (-(plane_box * table.normal_b).sum(axis=1)).atan2(plane_box[:, 0])
         if np.max(np.abs((alpha.lower, alpha.upper))) > (self.domain.alpha_abs_max_rad):
             raise TubeCertificationError(
                 "strip angle of attack left the validated domain"
@@ -522,13 +724,13 @@ class TubePropagator:
         cl *= scale
         cd *= scale
         cm *= scale
-        pressure = 0.5 * density * speed.square()
+        pressure = speed.square() * (0.5 * density)
         force_strips = (
             pressure[:, None]
             * table.area_m2[:, None]
-            * (cl[:, None] * lift + cd[:, None] * drag)
+            * (lift * cl[:, None] + drag * cd[:, None])
         )
-        moment_strips = self._locations.cross(force_strips)
+        moment_strips = force_strips.cross(-self._locations)
         moment_strips += (
             pressure[:, None]
             * table.area_m2[:, None]
@@ -538,10 +740,13 @@ class TubePropagator:
         )
         force = force_strips.sum(axis=0)
         moment = moment_strips.sum(axis=0)
-        cg_air = velocity - self._center_flow
+        cg_air = AffineForm.from_interval(velocity) - center_flow
         cg_speed = cg_air.norm()
         force += (
-            -0.5 * density * self.aircraft.config.drag_area_fuse_m2 * cg_speed * cg_air
+            cg_speed
+            * cg_air
+            * (-0.5 * self.aircraft.config.drag_area_fuse_m2)
+            * density
         )
         force_error = np.asarray(
             self.uncertainty.force_error_abs_n,
@@ -551,10 +756,15 @@ class TubePropagator:
             self.uncertainty.moment_error_abs_n_m,
             dtype=float,
         ).reshape(3)
-        return (
-            force + Interval(-force_error, force_error),
-            moment + Interval(-moment_error, moment_error),
-        )
+        force += Interval(-force_error, force_error)
+        moment += Interval(-moment_error, moment_error)
+        reference_offset = np.asarray(
+            self.uncertainty.moment_reference_offset_abs_m,
+            dtype=float,
+        ).reshape(3)
+        offset = AffineForm.from_interval(Interval(-reference_offset, reference_offset))
+        moment -= offset.cross(force)
+        return force, moment
 
     def _point_velocities(
         self,
@@ -770,15 +980,46 @@ def _hull(values: list[Interval]) -> Interval:
     return result
 
 
-def _reduce(value: Zonotope, maximum: int) -> Zonotope:
+def _reduce(
+    value: Zonotope,
+    maximum: int,
+    protected: tuple[int, ...] = (),
+) -> Zonotope:
     count = value.generators.shape[1]
     if count <= maximum:
         return value
     keep_count = max(maximum - value.center.size, 0)
     norms = np.linalg.norm(value.generators, axis=0)
-    indices = np.argsort(norms)
-    discarded = value.generators[:, indices[: count - keep_count]]
-    kept = value.generators[:, indices[count - keep_count :]]
+    protected_indices = np.unique(
+        np.asarray(
+            [index for index in protected if 0 <= index < count],
+            dtype=int,
+        )
+    )
+    if keep_count == 0:
+        protected_indices = np.empty(0, dtype=int)
+    elif protected_indices.size > keep_count:
+        order = np.argsort(norms[protected_indices])
+        protected_indices = protected_indices[order[-keep_count:]]
+    candidates = np.setdiff1d(
+        np.arange(count),
+        protected_indices,
+        assume_unique=True,
+    )
+    remaining = keep_count - protected_indices.size
+    selected = (
+        candidates[np.argsort(norms[candidates])[-remaining:]]
+        if remaining > 0
+        else np.empty(0, dtype=int)
+    )
+    kept_indices = np.concatenate((protected_indices, selected))
+    discarded_indices = np.setdiff1d(
+        np.arange(count),
+        kept_indices,
+        assume_unique=True,
+    )
+    discarded = value.generators[:, discarded_indices]
+    kept = value.generators[:, kept_indices]
     radius = Zonotope(np.zeros(value.center.size), discarded).radius
     return Zonotope(
         value.center,
@@ -786,10 +1027,50 @@ def _reduce(value: Zonotope, maximum: int) -> Zonotope:
     )
 
 
-def _join(*values: Interval) -> Interval:
-    return Interval(
-        np.concatenate([value.lower.reshape(-1) for value in values]),
-        np.concatenate([value.upper.reshape(-1) for value in values]),
+def _join_affine(*values: AffineForm | Interval) -> AffineForm:
+    forms = [
+        value if isinstance(value, AffineForm) else AffineForm.from_interval(value)
+        for value in values
+    ]
+    generated = [value for value in forms if value.generator_count]
+    if not generated:
+        interval = Interval(
+            np.concatenate(
+                [value.interval_hull().lower.reshape(-1) for value in forms]
+            ),
+            np.concatenate(
+                [value.interval_hull().upper.reshape(-1) for value in forms]
+            ),
+        )
+        return AffineForm.from_interval(interval)
+    basis = generated[0].basis
+    count = generated[0].generator_count
+    if any(
+        value.basis is not basis or value.generator_count != count
+        for value in generated
+    ):
+        raise ValueError("affine derivatives have inconsistent generator bases")
+    aligned = []
+    for value in forms:
+        if value.generator_count:
+            aligned.append(value)
+        else:
+            aligned.append(
+                AffineForm(
+                    value.center,
+                    np.zeros(value.center.shape + (count,)),
+                    value.remainder,
+                    basis,
+                )
+            )
+    return AffineForm(
+        np.concatenate([value.center.reshape(-1) for value in aligned]),
+        np.concatenate(
+            [value.generators.reshape(-1, count) for value in aligned],
+            axis=0,
+        ),
+        np.concatenate([value.remainder.reshape(-1) for value in aligned]),
+        basis,
     )
 
 

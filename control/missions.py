@@ -93,6 +93,11 @@ class Mission(Protocol):
 
         ...
 
+    def realized(self, states: npt.ArrayLike) -> bool:
+        """Return whether a realized trajectory satisfies the terminal event."""
+
+        ...
+
     def running_cost(
         self,
         state: npt.ArrayLike,
@@ -113,13 +118,13 @@ class GateMission:
     """Robust full-body passage through a rectangular aperture."""
 
     free_space: FreeSpace
+    geometry: RigidBodyGeometry
     center_w_m: Vector3 = (6.6, 2.2, 1.4)
     normal_w: Vector3 = (1.0, 0.0, 0.0)
     width_axis_w: Vector3 = (0.0, 1.0, 0.0)
     width_m: float = 1.2
     height_m: float = 0.5
     margin_m: float = 0.0
-    geometry: RigidBodyGeometry = RigidBodyGeometry()
     control_weight: float = 0.01
 
     def __post_init__(self) -> None:
@@ -248,6 +253,7 @@ class LandingMission:
     """Robust first-contact landing on a finite planar platform."""
 
     free_space: FreeSpace
+    geometry: RigidBodyGeometry
     center_w_m: Vector3 = (6.0, 2.2, 1.0)
     length_axis_w: Vector3 = (1.0, 0.0, 0.0)
     width_axis_w: Vector3 = (0.0, 1.0, 0.0)
@@ -261,7 +267,6 @@ class LandingMission:
         radians(25.0),
     )
     margin_m: float = 0.0
-    geometry: RigidBodyGeometry = RigidBodyGeometry()
     touchdown_pitch_rad: float = radians(4.0)
     control_weight: float = 0.01
 

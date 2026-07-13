@@ -21,6 +21,11 @@ POINT_GEOMETRY = RigidBodyGeometry(
     contact_b_m=((0.0, 0.0, 0.0),),
     footprint_b_m=((0.0, 0.0, 0.0),),
 )
+EXTENDED_GEOMETRY = RigidBodyGeometry(
+    body_b_m=((-0.3, 0.0, 0.0), (0.3, 0.0, 0.0)),
+    contact_b_m=((-0.3, 0.0, 0.0),),
+    footprint_b_m=((-0.3, 0.0, 0.0), (0.3, 0.0, 0.0)),
+)
 
 
 def _state(
@@ -166,13 +171,39 @@ class FreeSpaceTests(TestCase):
             with self.subTest(occupied=occupied.center.tolist()):
                 self.assertFalse(free.contains(_body_tube((occupied,))))
 
-    def test_default_contact_points_belong_to_the_body(self) -> None:
-        """Keep every default first-contact point on the body model."""
 
-        geometry = RigidBodyGeometry()
-        body = np.asarray(geometry.body_b_m)
-        for contact in np.asarray(geometry.contact_b_m):
-            self.assertTrue(np.any(np.all(body == contact, axis=1)))
+class GeometryContractTests(TestCase):
+    """Require an explicit certified physical-body description."""
+
+    def test_geometry_cannot_be_omitted(self) -> None:
+        """Prevent surface-only defaults from silently certifying a mission."""
+
+        free = FreeSpace(((-2.0, 2.0), (-2.0, 2.0), (-2.0, 2.0)))
+        constructors = (
+            lambda: RigidBodyGeometry(),
+            lambda: GateMission(free),
+            lambda: LandingMission(free),
+            lambda: Gate(),
+            lambda: Platform(),
+        )
+        for constructor in constructors:
+            with self.subTest(constructor=constructor):
+                with self.assertRaises(TypeError):
+                    constructor()
+
+    def test_contact_and_footprint_belong_to_the_body(self) -> None:
+        """Reject terminal geometry outside the certified occupied body."""
+
+        for field in ("contact_b_m", "footprint_b_m"):
+            values = {
+                "body_b_m": ((0.0, 0.0, 0.0),),
+                "contact_b_m": ((0.0, 0.0, 0.0),),
+                "footprint_b_m": ((0.0, 0.0, 0.0),),
+            }
+            values[field] = ((1.0, 0.0, 0.0),)
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, field):
+                    RigidBodyGeometry(**values)
 
 
 class GateMissionTests(TestCase):
@@ -318,6 +349,7 @@ class GateMissionTests(TestCase):
 
         full_body = GateMission(
             self.free,
+            geometry=EXTENDED_GEOMETRY,
             center_w_m=(0.0, 0.0, 0.0),
             width_m=2.0,
             height_m=2.0,
@@ -396,7 +428,7 @@ class LandingMissionTests(TestCase):
         geometry = RigidBodyGeometry(
             body_b_m=((0.0, 0.5, 0.0),),
             contact_b_m=((0.0, 0.5, 0.0),),
-            footprint_b_m=((0.0, 0.0, 0.0),),
+            footprint_b_m=((0.0, 0.5, 0.0),),
         )
         contact_state = _state(
             (0.0, 0.0, 0.0),
@@ -546,7 +578,6 @@ class MissionReuseTests(TestCase):
             gradient_lower_s=np.full((3, 3), -2.0),
             gradient_upper_s=np.full((3, 3), 2.0),
             remainder_abs_m_s=(0.25, 0.25, 0.5),
-            rate_abs_m_s2=(5.0, 5.0, 10.0),
         )
         uncertainty = _model_uncertainty(flow, aircraft)
         model_ids = (id(aircraft), id(flow), id(uncertainty))
@@ -561,24 +592,28 @@ class MissionReuseTests(TestCase):
         missions = (
             GateMission(
                 first_space,
+                geometry=POINT_GEOMETRY,
                 center_w_m=(0.0, 0.0, 1.0),
                 width_m=1.0,
                 height_m=0.5,
             ),
             GateMission(
                 second_space,
+                geometry=POINT_GEOMETRY,
                 center_w_m=(2.0, -1.0, 1.5),
                 width_m=1.8,
                 height_m=0.9,
             ),
             LandingMission(
                 first_space,
+                geometry=POINT_GEOMETRY,
                 center_w_m=(-0.5, 0.0, 0.5),
                 length_m=1.0,
                 width_m=0.8,
             ),
             LandingMission(
                 second_space,
+                geometry=POINT_GEOMETRY,
                 center_w_m=(1.5, 1.0, 0.8),
                 length_m=1.6,
                 width_m=1.2,
@@ -609,6 +644,8 @@ def _model_uncertainty(
         force_error_abs_n=np.full(3, 0.01),
         moment_error_abs_n_m=np.full(3, 0.001),
         angular_accel_error_abs_rad_s2=np.full(3, 0.1),
+        moment_reference_offset_abs_m=np.zeros(3),
         actuator_tau_s=(0.05, 0.07),
         command_error_abs_rad=np.full(3, radians(0.5)),
+        command_delay_max_s=0.0,
     )

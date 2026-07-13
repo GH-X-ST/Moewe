@@ -1,7 +1,8 @@
-"""Outward-rounded interval boxes for deterministic set propagation."""
+"""Outward-rounded interval and affine-generator set arithmetic."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -582,6 +583,390 @@ class Zonotope:
         if np.any(center_box.radius > 0.0):
             generators = np.column_stack((generators, np.diag(center_box.radius)))
         return Zonotope(center_box.center, generators)
+
+
+@dataclass(frozen=True)
+class AffineForm:
+    """Affine generators with an axis-aligned nonlinear remainder."""
+
+    center: npt.ArrayLike
+    generators: npt.ArrayLike
+    remainder: npt.ArrayLike
+    basis: object | None = None
+
+    __array_priority__ = 1000
+
+    def __post_init__(self) -> None:
+        center = np.asarray(self.center, dtype=float)
+        generators = np.asarray(self.generators, dtype=float)
+        remainder = np.broadcast_to(
+            np.asarray(self.remainder, dtype=float),
+            center.shape,
+        )
+        if generators.size == 0:
+            generators = np.empty(center.shape + (0,))
+        if generators.ndim != center.ndim + 1:
+            raise ValueError("affine-form generators need one trailing axis")
+        if generators.shape[:-1] != center.shape:
+            raise ValueError("affine-form generator shape mismatch")
+        if (
+            not np.all(np.isfinite(center))
+            or not np.all(np.isfinite(generators))
+            or not np.all(np.isfinite(remainder))
+            or np.any(remainder < 0.0)
+        ):
+            raise ValueError("affine-form values must be finite")
+        center = np.array(center, copy=True)
+        generators = np.array(generators, copy=True)
+        remainder = np.array(remainder, copy=True)
+        center.flags.writeable = False
+        generators.flags.writeable = False
+        remainder.flags.writeable = False
+        object.__setattr__(self, "center", center)
+        object.__setattr__(self, "generators", generators)
+        object.__setattr__(self, "remainder", remainder)
+        if generators.shape[-1] and self.basis is None:
+            object.__setattr__(self, "basis", object())
+
+    @classmethod
+    def from_interval(cls, interval: Interval) -> AffineForm:
+        """Return an affine form enclosing an interval without correlation."""
+
+        return cls(
+            interval.center,
+            np.empty(interval.lower.shape + (0,)),
+            interval.radius,
+        )
+
+    @classmethod
+    def from_zonotope(
+        cls,
+        zonotope: Zonotope,
+        shape: tuple[int, ...] | None = None,
+    ) -> AffineForm:
+        """Return an affine form retaining every zonotope generator."""
+
+        value_shape = (zonotope.center.size,) if shape is None else shape
+        if int(np.prod(value_shape)) != zonotope.center.size:
+            raise ValueError("affine-form shape must match zonotope dimension")
+        count = zonotope.generators.shape[1]
+        return cls(
+            zonotope.center.reshape(value_shape),
+            zonotope.generators.reshape(value_shape + (count,)),
+            np.zeros(value_shape),
+        )
+
+    @property
+    def generator_count(self) -> int:
+        """Return the number of shared affine generators."""
+
+        return int(self.generators.shape[-1])
+
+    def interval_hull(self) -> Interval:
+        """Return an outward-rounded interval hull."""
+
+        radius = _sum_nonnegative(self.remainder, np.abs(self.generators))
+        return Interval.from_midpoint(self.center, radius)
+
+    def sum(self, axis: int | None = None) -> AffineForm:
+        """Sum components while retaining shared-generator cancellation."""
+
+        axes: tuple[int, ...]
+        if axis is None:
+            axes = tuple(range(self.center.ndim))
+        else:
+            axes = (axis % self.center.ndim,)
+        center = Interval.point(self.center)
+        generators = Interval.point(self.generators)
+        remainder = Interval(-self.remainder, self.remainder)
+        for current in sorted(axes, reverse=True):
+            center = center.sum(axis=current)
+            generators = generators.sum(axis=current)
+            remainder = remainder.sum(axis=current)
+        return _affine_from_boxes(
+            center,
+            generators,
+            remainder,
+            self.basis,
+        )
+
+    def cross(self, other: AffineForm | Interval | npt.ArrayLike) -> AffineForm:
+        """Return the cross product along the final value axis."""
+
+        operand = _as_affine_form(other)
+        if self.center.shape[-1:] != (3,) or operand.center.shape[-1:] != (3,):
+            raise ValueError("cross operands must end in three components")
+        components = (
+            self[..., 1] * operand[..., 2] - self[..., 2] * operand[..., 1],
+            self[..., 2] * operand[..., 0] - self[..., 0] * operand[..., 2],
+            self[..., 0] * operand[..., 1] - self[..., 1] * operand[..., 0],
+        )
+        return _stack_affine(components, axis=-1)
+
+    def square(self) -> AffineForm:
+        """Return the componentwise square enclosure."""
+
+        return self * self
+
+    def sqrt(self) -> AffineForm:
+        """Return a componentwise square-root enclosure."""
+
+        hull = self.interval_hull()
+        if np.any(hull.lower < 0.0):
+            raise ValueError("square root requires a nonnegative affine form")
+        if np.any(hull.lower == 0.0):
+            return AffineForm.from_interval(hull.sqrt())
+
+        def derivative(value: Interval) -> Interval:
+            return 0.5 / value.sqrt()
+
+        return self._unary(Interval.sqrt, derivative)
+
+    def norm(self, axis: int | None = None) -> AffineForm:
+        """Return the Euclidean-norm enclosure."""
+
+        squared = self.square().sum(axis=axis)
+        if np.any(squared.interval_hull().lower < 0.0):
+            return AffineForm.from_interval(self.interval_hull().norm(axis=axis))
+        return squared.sqrt()
+
+    def replace(
+        self,
+        mask: npt.ArrayLike,
+        enclosure: Interval,
+    ) -> AffineForm:
+        """Replace selected leading components by interval enclosures."""
+
+        selected = np.asarray(mask, dtype=bool)
+        if selected.shape != self.center.shape[: selected.ndim]:
+            raise ValueError("replacement mask shape mismatch")
+        center = np.array(self.center)
+        generators = np.array(self.generators)
+        remainder = np.array(self.remainder)
+        center[selected] = enclosure.center[selected]
+        generators[selected] = 0.0
+        remainder[selected] = enclosure.radius[selected]
+        return AffineForm(center, generators, remainder, self.basis)
+
+    def _unary(
+        self,
+        operation: Callable[[Interval], Interval],
+        derivative: Callable[[Interval], Interval],
+    ) -> AffineForm:
+        hull = self.interval_hull()
+        center_value = operation(Interval.point(self.center))
+        derivative_center = derivative(Interval.point(self.center))
+        derivative_hull = derivative(hull)
+        generators = Interval.point(self.generators) * derivative_center[..., None]
+        delta = hull - self.center
+        remainder = (
+            derivative_center * Interval(-self.remainder, self.remainder)
+            + (derivative_hull - derivative_center) * delta
+        )
+        return _affine_from_boxes(
+            center_value,
+            generators,
+            remainder,
+            self.basis,
+        )
+
+    def __getitem__(self, key: object) -> AffineForm:
+        generator_key = key if isinstance(key, tuple) else (key,)
+        return AffineForm(
+            self.center[key],
+            self.generators[generator_key + (slice(None),)],
+            self.remainder[key],
+            self.basis,
+        )
+
+    def __neg__(self) -> AffineForm:
+        return AffineForm(
+            -self.center,
+            -self.generators,
+            self.remainder,
+            self.basis,
+        )
+
+    def __add__(
+        self,
+        other: AffineForm | Interval | npt.ArrayLike,
+    ) -> AffineForm:
+        first, second, basis = _align_affine(self, _as_affine_form(other))
+        return _affine_from_boxes(
+            Interval.point(first.center) + second.center,
+            Interval.point(first.generators) + second.generators,
+            Interval(-first.remainder, first.remainder)
+            + Interval(-second.remainder, second.remainder),
+            basis,
+        )
+
+    def __radd__(
+        self,
+        other: AffineForm | Interval | npt.ArrayLike,
+    ) -> AffineForm:
+        return self + other
+
+    def __sub__(
+        self,
+        other: AffineForm | Interval | npt.ArrayLike,
+    ) -> AffineForm:
+        return self + -_as_affine_form(other)
+
+    def __rsub__(
+        self,
+        other: AffineForm | Interval | npt.ArrayLike,
+    ) -> AffineForm:
+        return _as_affine_form(other) - self
+
+    def __mul__(
+        self,
+        other: AffineForm | Interval | npt.ArrayLike,
+    ) -> AffineForm:
+        first, second, basis = _align_affine(self, _as_affine_form(other))
+        first_delta = first.interval_hull() - first.center
+        second_delta = second.interval_hull() - second.center
+        center = Interval.point(first.center) * second.center
+        generators = (
+            Interval.point(first.generators) * second.center[..., None]
+            + Interval.point(second.generators) * first.center[..., None]
+        )
+        linear_remainder = (
+            Interval(-first.remainder, first.remainder) * second.center
+            + Interval(-second.remainder, second.remainder) * first.center
+        )
+        nonlinear_remainder = first_delta * second_delta
+        return _affine_from_boxes(
+            center,
+            generators,
+            linear_remainder + nonlinear_remainder,
+            basis,
+        )
+
+    def __rmul__(
+        self,
+        other: AffineForm | Interval | npt.ArrayLike,
+    ) -> AffineForm:
+        return self * other
+
+    def __truediv__(
+        self,
+        other: AffineForm | Interval | npt.ArrayLike,
+    ) -> AffineForm:
+        operand = _as_affine_form(other)
+        hull = operand.interval_hull()
+        if np.any((hull.lower <= 0.0) & (hull.upper >= 0.0)):
+            raise ZeroDivisionError("affine-form denominator contains zero")
+
+        def reciprocal(value: Interval) -> Interval:
+            return 1.0 / value
+
+        def derivative(value: Interval) -> Interval:
+            return -1.0 / value.square()
+
+        return self * operand._unary(reciprocal, derivative)
+
+    def __rtruediv__(
+        self,
+        other: AffineForm | Interval | npt.ArrayLike,
+    ) -> AffineForm:
+        return _as_affine_form(other) / self
+
+
+def _align_affine(
+    first: AffineForm,
+    second: AffineForm,
+) -> tuple[AffineForm, AffineForm, object | None]:
+    shape = np.broadcast_shapes(first.center.shape, second.center.shape)
+    if first.generator_count and second.generator_count:
+        if first.basis is not second.basis:
+            raise ValueError("affine forms have independent generator bases")
+        if first.generator_count != second.generator_count:
+            raise ValueError("affine forms have inconsistent generator counts")
+        count = first.generator_count
+        basis = first.basis
+    else:
+        count = max(first.generator_count, second.generator_count)
+        basis = first.basis if first.generator_count else second.basis
+
+    def broadcast(value: AffineForm) -> AffineForm:
+        generators = value.generators
+        if value.generator_count == 0 and count:
+            generators = np.zeros(value.center.shape + (count,))
+        return AffineForm(
+            np.broadcast_to(value.center, shape),
+            np.broadcast_to(generators, shape + (count,)),
+            np.broadcast_to(value.remainder, shape),
+            basis,
+        )
+
+    return broadcast(first), broadcast(second), basis
+
+
+def _affine_from_boxes(
+    center: Interval,
+    generators: Interval,
+    remainder: Interval,
+    basis: object | None,
+) -> AffineForm:
+    shifted = center + remainder.center
+    error = _sum_nonnegative(
+        shifted.radius,
+        remainder.radius,
+        generators.radius,
+    )
+    return AffineForm(
+        shifted.center,
+        generators.center,
+        error,
+        basis,
+    )
+
+
+def _as_affine_form(
+    value: AffineForm | Interval | npt.ArrayLike,
+) -> AffineForm:
+    if isinstance(value, AffineForm):
+        return value
+    if isinstance(value, Interval):
+        return AffineForm.from_interval(value)
+    return AffineForm.from_interval(Interval.point(value))
+
+
+def _stack_affine(
+    values: tuple[AffineForm, ...],
+    axis: int,
+) -> AffineForm:
+    basis = values[0].basis
+    count = values[0].generator_count
+    if any(value.basis is not basis for value in values):
+        raise ValueError("affine forms have independent generator bases")
+    output_ndim = values[0].center.ndim + 1
+    value_axis = axis % output_ndim
+    return AffineForm(
+        np.stack([value.center for value in values], axis=value_axis),
+        np.stack([value.generators for value in values], axis=value_axis),
+        np.stack([value.remainder for value in values], axis=value_axis),
+        basis if count else None,
+    )
+
+
+def _sum_nonnegative(*values: np.ndarray) -> np.ndarray:
+    shape = np.broadcast_shapes(*(value.shape[:-1] for value in values[-1:]))
+    result = np.zeros(shape)
+    for position, value in enumerate(values):
+        array = np.asarray(value, dtype=float)
+        contributions = (
+            np.moveaxis(array, -1, 0)
+            if position == len(values) - 1 and array.ndim == result.ndim + 1
+            else np.broadcast_to(array, shape)[None, ...]
+        )
+        for contribution in contributions:
+            result = np.where(
+                contribution == 0.0,
+                result,
+                _up(result + contribution),
+            )
+    return result
 
 
 def _new_interval(lower: npt.ArrayLike, upper: npt.ArrayLike) -> Interval:

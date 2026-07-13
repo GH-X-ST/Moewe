@@ -7,6 +7,7 @@ from unittest import TestCase
 import numpy as np
 
 from control.flow import AffineFlow, FlowBounds
+from control.interval import Interval
 from models.aircraft import Aircraft
 from models.geometry import body_to_world
 
@@ -48,7 +49,6 @@ class FlowTests(TestCase):
             gradient_lower,
             gradient_upper,
             remainder_abs,
-            np.ones(3),
         )
         remainder = np.broadcast_to(remainder_abs, locations.shape)
         lower_flow = AffineFlow(center_lower, gradient_lower, -remainder)
@@ -61,28 +61,125 @@ class FlowTests(TestCase):
         self.assertTrue(bounds.contains(lower_flow))
         self.assertTrue(bounds.contains(upper_flow))
 
-    def test_flow_rate_checks_every_affine_component(self) -> None:
-        """Bound temporal changes in value, gradient, and remainder."""
+    def test_joint_zonotope_marginals_cover_general_strip_bounds(self) -> None:
+        """Match all public marginals of the stacked joint flow set."""
 
-        remainder = np.zeros((2, 3))
-        previous = AffineFlow(np.zeros(3), np.zeros((3, 3)), remainder)
+        locations, bounds = _general_flow_bounds()
+        joint = bounds.joint_zonotope(locations)
+        hull = joint.interval_hull()
+        strip_lower, strip_upper = bounds.strip_bounds(locations)
+        expected_lower = np.vstack((bounds.center_lower_m_s, strip_lower)).reshape(-1)
+        expected_upper = np.vstack((bounds.center_upper_m_s, strip_upper)).reshape(-1)
+
+        self.assertEqual(joint.center.size, 3 * (locations.shape[0] + 1))
+        self.assertEqual(joint.generators.shape[1], 12 + 3 * locations.shape[0])
+        self.assertTrue(np.all(hull.lower <= expected_lower))
+        self.assertTrue(np.all(hull.upper >= expected_upper))
+
+    def test_joint_zonotope_has_stacked_q_generator_layout(self) -> None:
+        """Implement (1 kron I)c and Q vec(G) with shared columns."""
+
+        locations, bounds = _general_flow_bounds()
+        joint = bounds.joint_zonotope(locations)
+        generators = joint.generators.reshape(
+            locations.shape[0] + 1,
+            3,
+            -1,
+        )
+        center_radius = Interval(
+            bounds.center_lower_m_s,
+            bounds.center_upper_m_s,
+        ).radius
+        gradient_radius = Interval(
+            bounds.gradient_lower_s,
+            bounds.gradient_upper_s,
+        ).radius
+
+        for component in range(3):
+            np.testing.assert_allclose(
+                generators[:, component, component],
+                center_radius[component],
+            )
+            for coordinate in range(3):
+                column = 3 + 3 * coordinate + component
+                self.assertEqual(generators[0, component, column], 0.0)
+                np.testing.assert_allclose(
+                    generators[1:, component, column],
+                    locations[:, coordinate] * gradient_radius[component, coordinate],
+                )
+        for strip in range(locations.shape[0]):
+            for component in range(3):
+                column = 12 + 3 * strip + component
+                nonzero = np.argwhere(np.abs(generators[..., column]) > 0.0)
+                np.testing.assert_array_equal(nonzero, ((strip + 1, component),))
+                self.assertGreaterEqual(
+                    generators[strip + 1, component, column],
+                    bounds.remainder_abs_m_s[component],
+                )
+
+    def test_joint_zonotope_support_matches_affine_model(self) -> None:
+        """Match analytic support of the shared value, gradient, and error."""
+
+        locations, bounds = _general_flow_bounds()
+        joint = bounds.joint_zonotope(locations)
+        center = Interval(bounds.center_lower_m_s, bounds.center_upper_m_s)
+        gradient = Interval(bounds.gradient_lower_s, bounds.gradient_upper_s)
+        random = np.random.default_rng(1847)
+        for direction in random.normal(size=(32, joint.center.size)):
+            weights = direction.reshape(locations.shape[0] + 1, 3)
+            center_coefficient = weights.sum(axis=0)
+            gradient_coefficient = np.einsum(
+                "ia,ib->ab",
+                weights[1:],
+                locations,
+            )
+            expected = float(direction @ joint.center)
+            expected += float(np.abs(center_coefficient) @ center.radius)
+            expected += float(np.sum(np.abs(gradient_coefficient) * gradient.radius))
+            expected += float(np.sum(np.abs(weights[1:]) * bounds.remainder_abs_m_s))
+            self.assertGreaterEqual(joint.support(direction) + 1.0e-12, expected)
+            self.assertAlmostEqual(joint.support(direction), expected, places=11)
+
+    def test_joint_gradient_generator_cancels_across_symmetric_strips(self) -> None:
+        """Exclude strip extremes that one shared gradient cannot produce."""
+
+        locations = np.array(((-1.0, 0.0, 0.0), (1.0, 0.0, 0.0)))
+        gradient_lower = np.zeros((3, 3))
+        gradient_upper = np.zeros((3, 3))
+        gradient_lower[2, 0] = -0.4
+        gradient_upper[2, 0] = 0.4
+        bounds = FlowBounds(
+            np.zeros(3),
+            np.zeros(3),
+            gradient_lower,
+            gradient_upper,
+            np.zeros(3),
+        )
+        joint = bounds.joint_zonotope(locations)
+        sum_direction = np.zeros(joint.center.size)
+        sum_direction[5] = 1.0
+        sum_direction[8] = 1.0
+        difference_direction = np.zeros(joint.center.size)
+        difference_direction[5] = -1.0
+        difference_direction[8] = 1.0
+
+        self.assertLess(joint.support(sum_direction), 1.0e-12)
+        self.assertAlmostEqual(joint.support(difference_direction), 0.8, places=12)
+
+    def test_flow_bounds_have_no_temporal_rate_api(self) -> None:
+        """Represent arbitrary temporal variation inside amplitude bounds."""
+
         bounds = FlowBounds(
             (-1.0,) * 3,
             (1.0,) * 3,
             np.full((3, 3), -1.0),
             np.full((3, 3), 1.0),
             (1.0,) * 3,
-            (2.0,) * 3,
-            gradient_rate_abs_s2=np.full((3, 3), 3.0),
-            remainder_rate_abs_m_s2=(4.0,) * 3,
         )
-        current = AffineFlow(
-            np.full(3, 0.2),
-            np.full((3, 3), 0.3),
-            np.full_like(remainder, 0.4),
-        )
-        self.assertTrue(bounds.rate_contains(previous, current, 0.1))
-        self.assertFalse(bounds.rate_contains(previous, current, 0.05))
+        self.assertFalse(hasattr(bounds, "rate_contains"))
+        self.assertFalse(hasattr(bounds, "rate_abs_m_s2"))
+        self.assertFalse(hasattr(bounds, "gradient_rate_abs_s2"))
+        self.assertFalse(hasattr(bounds, "remainder_rate_abs_m_s2"))
 
     def test_local_flow_intrinsic_equivalence(self) -> None:
         """Remove absolute position and global yaw from intrinsic dynamics."""
@@ -209,3 +306,15 @@ class FlowTests(TestCase):
         np.testing.assert_allclose(positive_force[1], -negative_force[1])
         np.testing.assert_allclose(positive_moment[0], -negative_moment[0])
         np.testing.assert_allclose(positive_moment[2], -negative_moment[2])
+
+
+def _general_flow_bounds() -> tuple[np.ndarray, FlowBounds]:
+    locations = np.array(((0.4, -0.7, 0.2), (-0.3, 0.6, -0.1), (0.9, 0.1, 0.5)))
+    bounds = FlowBounds(
+        (-1.2, 0.3, -0.8),
+        (0.7, 1.5, 0.4),
+        np.array(((-0.4, 0.1, -0.2), (-0.3, -0.5, 0.2), (0.0, -0.6, -0.1))),
+        np.array(((0.2, 0.5, 0.3), (0.4, 0.1, 0.7), (0.8, 0.2, 0.6))),
+        (0.07, 0.11, 0.05),
+    )
+    return locations, bounds
