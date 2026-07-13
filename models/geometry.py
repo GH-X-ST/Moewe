@@ -8,21 +8,68 @@ from math import cos, sin
 import numpy as np
 import numpy.typing as npt
 
+from models.aircraft import LiftingSurface, default_aircraft_config
 from models.state import as_state
 
-
 Vector3 = tuple[float, float, float]
-_ORIGIN = ((0.0, 0.0, 0.0),)
-_INTERPOLATION_RATIOS = np.linspace(0.0, 1.0, 65)
+
+
+def _surface_vertices(surface: LiftingSurface) -> np.ndarray:
+    root = np.asarray(surface.root_le_b_m, dtype=float)
+    chord = np.array([-surface.chord_m, 0.0, 0.0])
+    if surface.vertical:
+        tip = np.array([0.0, 0.0, -surface.span_m])
+        return np.array([root, root + chord, root + tip, root + tip + chord])
+
+    semispan = 0.5 * surface.span_m if surface.symmetric else surface.span_m
+    vertices = [root, root + chord]
+    side_signs = (1.0, -1.0) if surface.symmetric else (1.0,)
+    for side_sign in side_signs:
+        tip = np.array(
+            [
+                0.0,
+                side_sign * semispan * cos(surface.dihedral_rad),
+                -semispan * sin(surface.dihedral_rad),
+            ]
+        )
+        vertices.extend((root + tip, root + tip + chord))
+    return np.asarray(vertices)
+
+
+def _surface_corners() -> np.ndarray:
+    surfaces = default_aircraft_config().surfaces
+    return np.vstack([_surface_vertices(surface) for surface in surfaces])
+
+
+_SURFACE_CORNERS_B_M = _surface_corners()
+_DEFAULT_BODY_B_M = tuple(
+    tuple(float(value) for value in point) for point in _SURFACE_CORNERS_B_M
+)
+_LOWEST_SURFACE_Z_B_M = float(np.max(_SURFACE_CORNERS_B_M[:, 2]))
+_DEFAULT_CONTACT_B_M = tuple(
+    tuple(float(value) for value in point)
+    for point in _SURFACE_CORNERS_B_M[
+        np.isclose(_SURFACE_CORNERS_B_M[:, 2], _LOWEST_SURFACE_Z_B_M)
+    ]
+)
 
 
 @dataclass(frozen=True)
 class RigidBodyGeometry:
-    """Finite-vertex body, contact, and landing-footprint sets."""
+    """Finite body, first-contact, and landing-footprint vertices."""
 
-    body_b_m: npt.ArrayLike = _ORIGIN
-    contact_b_m: npt.ArrayLike = _ORIGIN
-    footprint_b_m: npt.ArrayLike = _ORIGIN
+    body_b_m: npt.ArrayLike = _DEFAULT_BODY_B_M
+    contact_b_m: npt.ArrayLike = _DEFAULT_CONTACT_B_M
+    footprint_b_m: npt.ArrayLike = _DEFAULT_BODY_B_M
+
+    def __post_init__(self) -> None:
+        for name in ("body_b_m", "contact_b_m", "footprint_b_m"):
+            value = np.asarray(getattr(self, name), dtype=float).reshape(-1, 3)
+            if value.size == 0 or not np.all(np.isfinite(value)):
+                raise ValueError(f"{name} must contain finite body points")
+            value = value.copy()
+            value.flags.writeable = False
+            object.__setattr__(self, name, value)
 
 
 def world_points(state: npt.ArrayLike, points_b_m: npt.ArrayLike) -> np.ndarray:
@@ -46,8 +93,7 @@ def point_velocities(
 
 
 def gate_crossing(
-    previous_state: npt.ArrayLike,
-    state: npt.ArrayLike,
+    states: npt.ArrayLike,
     geometry: RigidBodyGeometry,
     center_w_m: Vector3,
     normal_w: Vector3,
@@ -56,39 +102,20 @@ def gate_crossing(
     height_m: float,
     margin_m: float,
 ) -> bool:
-    """Return whether the swept occupied body crosses a gate aperture."""
+    """Return whether a realized dense trajectory passes through a gate."""
 
-    previous = as_state(previous_state)
-    current = as_state(state)
-    state_delta = current - previous
+    trajectory = _trajectory(states)
     body = np.asarray(geometry.body_b_m, dtype=float).reshape(-1, 3)
     center = np.asarray(center_w_m, dtype=float)
     normal = np.asarray(normal_w, dtype=float)
     width_axis = np.asarray(width_axis_w, dtype=float)
     height_axis = np.cross(normal, width_axis)
-    previous_distance = float((previous[:3] - center) @ normal)
-    current_distance = float((current[:3] - center) @ normal)
-    if (
-        previous_distance > 0.0
-        or current_distance < 0.0
-        or current_distance <= previous_distance
-    ):
-        return False
-
-    crossing_ratio = -previous_distance / (
-        current_distance - previous_distance
-    )
-    ratios = np.unique(np.append(_INTERPOLATION_RATIOS, crossing_ratio))
-    swept = np.stack(
-        [
-            world_points(
-                previous + ratio * state_delta,
-                body,
-            )
-            for ratio in ratios
-        ]
-    )
+    swept = np.stack([world_points(state, body) for state in trajectory])
     plane_distance = (swept - center) @ normal
+    if np.max(plane_distance[0]) >= 0.0 or np.min(plane_distance[-1]) <= 0.0:
+        return False
+    if (trajectory[-1, :3] - center) @ normal <= (trajectory[0, :3] - center) @ normal:
+        return False
     intersects = (plane_distance.min(axis=1) <= 0.0) & (
         plane_distance.max(axis=1) >= 0.0
     )
@@ -97,16 +124,13 @@ def gate_crossing(
 
     offsets = swept[intersects] - center
     return bool(
-        np.max(np.abs(offsets @ width_axis))
-        <= 0.5 * width_m - margin_m
-        and np.max(np.abs(offsets @ height_axis))
-        <= 0.5 * height_m - margin_m
+        np.max(np.abs(offsets @ width_axis)) <= 0.5 * width_m - margin_m
+        and np.max(np.abs(offsets @ height_axis)) <= 0.5 * height_m - margin_m
     )
 
 
 def platform_landing(
-    previous_state: npt.ArrayLike,
-    state: npt.ArrayLike,
+    states: npt.ArrayLike,
     geometry: RigidBodyGeometry,
     center_w_m: Vector3,
     length_axis_w: Vector3,
@@ -119,11 +143,10 @@ def platform_landing(
     pitch_bounds_rad: tuple[float, float],
     margin_m: float,
 ) -> bool:
-    """Return whether first contact satisfies the platform constraints."""
+    """Return whether realized, event-located first contact is admissible."""
 
-    previous = as_state(previous_state)
-    current = as_state(state)
-    state_delta = current - previous
+    trajectory = _trajectory(states)
+    body = np.asarray(geometry.body_b_m, dtype=float).reshape(-1, 3)
     contact = np.asarray(geometry.contact_b_m, dtype=float).reshape(-1, 3)
     footprint_b = np.asarray(geometry.footprint_b_m, dtype=float).reshape(-1, 3)
     center = np.asarray(center_w_m, dtype=float)
@@ -131,51 +154,61 @@ def platform_landing(
     width_axis = np.asarray(width_axis_w, dtype=float)
     normal = np.cross(length_axis, width_axis)
 
-    def contact_height(ratio: float) -> float:
-        points = world_points(
-            previous + ratio * state_delta,
-            contact,
-        )
-        return float(np.min((points - center) @ normal))
-
-    heights = np.array(
-        [contact_height(ratio) for ratio in _INTERPOLATION_RATIOS]
+    contact_heights = np.stack(
+        [(world_points(state, contact) - center) @ normal for state in trajectory]
     )
-    if heights[0] <= 0.0 or heights[-1] > 0.0:
+    if np.min(contact_heights[0]) <= 0.0:
         return False
-    upper_index = int(np.flatnonzero(heights <= 0.0)[0])
-    lower = float(_INTERPOLATION_RATIOS[upper_index - 1])
-    upper = float(_INTERPOLATION_RATIOS[upper_index])
-    for _ in range(40):
-        middle = 0.5 * (lower + upper)
-        if contact_height(middle) > 0.0:
-            lower = middle
-        else:
-            upper = middle
-
-    touchdown = previous + upper * state_delta
-    contact_heights = (world_points(touchdown, contact) - center) @ normal
-    first_contact = contact_heights == np.min(contact_heights)
+    contacts = np.flatnonzero(np.min(contact_heights, axis=1) <= 0.0)
+    if contacts.size == 0:
+        return False
+    contact_index = int(contacts[0])
+    touchdown = trajectory[contact_index]
+    if any(
+        np.min((world_points(state, body) - center) @ normal) <= 0.0
+        for state in trajectory[:contact_index]
+    ):
+        return False
+    touchdown_heights = contact_heights[contact_index]
+    if np.min(touchdown_heights) < -1.0e-9:
+        return False
+    first_contact = np.isclose(
+        touchdown_heights,
+        np.min(touchdown_heights),
+        atol=1.0e-9,
+        rtol=0.0,
+    )
+    noncontact = np.array(
+        [point for point in body if not np.any(np.all(point == contact, axis=1))]
+    )
+    if (
+        noncontact.size
+        and np.min((world_points(touchdown, noncontact) - center) @ normal) <= 0.0
+    ):
+        return False
     contact_velocities = point_velocities(
         touchdown,
         contact[first_contact],
     )
     normal_speed = float(np.max(-contact_velocities @ normal))
-    contact_speed = float(
-        np.max(np.linalg.norm(contact_velocities, axis=1))
-    )
+    contact_speed = float(np.max(np.linalg.norm(contact_velocities, axis=1)))
     footprint = world_points(touchdown, footprint_b) - center
     phi, theta = touchdown[3:5]
     return bool(
-        np.max(np.abs(footprint @ length_axis))
-        <= 0.5 * length_m - margin_m
-        and np.max(np.abs(footprint @ width_axis))
-        <= 0.5 * width_m - margin_m
+        np.max(np.abs(footprint @ length_axis)) <= 0.5 * length_m - margin_m
+        and np.max(np.abs(footprint @ width_axis)) <= 0.5 * width_m - margin_m
         and 0.0 <= normal_speed <= normal_speed_max_m_s
         and contact_speed <= contact_speed_max_m_s
         and abs(float(phi)) <= roll_max_rad
         and pitch_bounds_rad[0] <= float(theta) <= pitch_bounds_rad[1]
     )
+
+
+def _trajectory(states: npt.ArrayLike) -> np.ndarray:
+    values = np.asarray(states, dtype=float)
+    if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] != 15:
+        raise ValueError("realized trajectory must contain at least two states")
+    return values
 
 
 def body_to_world(attitude_rad: npt.ArrayLike) -> np.ndarray:
@@ -201,3 +234,24 @@ def body_to_world(attitude_rad: npt.ArrayLike) -> np.ndarray:
         ],
         dtype=float,
     )
+
+
+def orthogonal_axes(
+    first_axis: npt.ArrayLike,
+    second_axis: npt.ArrayLike,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return normalized right-handed axes from two input directions."""
+
+    first = np.asarray(first_axis, dtype=float).reshape(3)
+    first_norm = float(np.linalg.norm(first))
+    if first_norm == 0.0:
+        raise ValueError("first axis must be nonzero")
+    first = first / first_norm
+
+    second = np.asarray(second_axis, dtype=float).reshape(3)
+    second = second - float(second @ first) * first
+    second_norm = float(np.linalg.norm(second))
+    if second_norm == 0.0:
+        raise ValueError("axes must not be parallel")
+    second = second / second_norm
+    return first, second, np.cross(first, second)

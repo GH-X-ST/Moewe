@@ -8,7 +8,7 @@ from math import pi
 import numpy as np
 import numpy.typing as npt
 
-from models.state import G_M_S2, as_state, mechanical_energy_rate
+from models.state import G_M_S2, as_state
 
 DEFAULT_RHO_KG_M3 = 1.225
 EPS = 1.0e-9
@@ -24,29 +24,69 @@ _FLAT_PLATE_AR = np.array(
 )
 _FLAT_PLATE_A_LE = np.array(
     [
-        3.0, 3.64, 4.48, 7.18, 10.2, 13.38,
-        14.84, 14.49, 9.95, 12.93, 15.0, 15.0,
+        3.0,
+        3.64,
+        4.48,
+        7.18,
+        10.2,
+        13.38,
+        14.84,
+        14.49,
+        9.95,
+        12.93,
+        15.0,
+        15.0,
     ],
     dtype=float,
 )
 _FLAT_PLATE_A_TE = np.array(
     [
-        5.9, 15.51, 32.57, 39.44, 48.22, 59.29,
-        21.55, 7.74, 7.05, 5.26, 6.5, 6.5,
+        5.9,
+        15.51,
+        32.57,
+        39.44,
+        48.22,
+        59.29,
+        21.55,
+        7.74,
+        7.05,
+        5.26,
+        6.5,
+        6.5,
     ],
     dtype=float,
 )
 _FLAT_PLATE_ALPHA_LE_DEG = np.array(
     [
-        59.0, 58.6, 58.2, 50.0, 41.53, 26.7,
-        23.44, 21.0, 18.63, 14.28, 11.6, 10.0,
+        59.0,
+        58.6,
+        58.2,
+        50.0,
+        41.53,
+        26.7,
+        23.44,
+        21.0,
+        18.63,
+        14.28,
+        11.6,
+        10.0,
     ],
     dtype=float,
 )
 _FLAT_PLATE_ALPHA_TE_DEG = np.array(
     [
-        59.0, 58.6, 58.2, 51.85, 41.46, 28.09,
-        39.4, 35.86, 26.76, 19.76, 16.43, 14.0,
+        59.0,
+        58.6,
+        58.2,
+        51.85,
+        41.46,
+        28.09,
+        39.4,
+        35.86,
+        26.76,
+        19.76,
+        16.43,
+        14.0,
     ],
     dtype=float,
 )
@@ -121,9 +161,11 @@ class _StripTable:
     alpha0_rad: np.ndarray
 
 
-def _flat_plate_coefficients(
+def flat_plate_coefficients(
     aspect_ratio: npt.ArrayLike,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return flat-plate transition coefficients by aspect ratio."""
+
     ar = np.clip(
         np.asarray(aspect_ratio, dtype=float),
         _FLAT_PLATE_AR[0],
@@ -266,6 +308,19 @@ class Aircraft:
             [limit.positive_rad for limit in self.config.control_limits_rad],
             dtype=float,
         )
+        arrays = (
+            self.inertia_b_kg_m2,
+            self.inertia_inv_b,
+            self.control_lower_rad,
+            self.control_upper_rad,
+            *(
+                value
+                for value in vars(self.strip_table).values()
+                if isinstance(value, np.ndarray)
+            ),
+        )
+        for array in arrays:
+            array.flags.writeable = False
 
     def __call__(
         self,
@@ -277,13 +332,35 @@ class Aircraft:
         """Return the derivative of the 15-state aircraft vector."""
 
         state_array = as_state(state)
-        target = self.clip_control(control)
-        c_wb, f_aero_b, m_aero_b = self._aero_loads(
+        center_b, strips_b = self.sample_local_flow(state_array, wind_model)
+        return self.derivative_local_flow(
             state_array,
-            wind_model,
+            control,
+            center_b,
+            strips_b,
+            rho,
+        )
+
+    def derivative_local_flow(
+        self,
+        state: npt.ArrayLike,
+        control: npt.ArrayLike,
+        center_b_m_s: npt.ArrayLike,
+        strip_b_m_s: npt.ArrayLike,
+        rho: float = DEFAULT_RHO_KG_M3,
+    ) -> np.ndarray:
+        """Return state dynamics from body-relative local flow."""
+
+        state_array = as_state(state)
+        target = self.clip_control(control)
+        f_aero_b, m_aero_b = self.aero_loads_local_flow(
+            state_array,
+            center_b_m_s,
+            strip_b_m_s,
             float(rho),
         )
         phi, theta = state_array[3], state_array[4]
+        c_wb = _c_wb_numpy(phi, theta, state_array[5])
         v_b = state_array[6:9]
         omega_b = state_array[9:12]
         surface = state_array[12:15]
@@ -291,8 +368,7 @@ class Aircraft:
         f_total_b = f_aero_b + self.mass_kg * gravity_b
         v_dot_b = f_total_b / self.mass_kg - np.cross(omega_b, v_b)
         omega_dot_b = self.inertia_inv_b @ (
-            m_aero_b
-            - np.cross(omega_b, self.inertia_b_kg_m2 @ omega_b)
+            m_aero_b - np.cross(omega_b, self.inertia_b_kg_m2 @ omega_b)
         )
         euler_dot = _t_euler_numpy(phi, theta) @ omega_b
         tau = np.maximum(
@@ -305,86 +381,62 @@ class Aircraft:
             [position_dot, euler_dot, v_dot_b, omega_dot_b, surface_dot]
         )
 
-    def clip_control(self, control: npt.ArrayLike) -> np.ndarray:
-        """Clip aggregate control targets to surface limits."""
-
-        values = np.asarray(control, dtype=float).reshape(3)
-        return np.clip(values, self.control_lower_rad, self.control_upper_rad)
-
-    def air_data(
+    def sample_local_flow(
         self,
         state: npt.ArrayLike,
         wind_model: object = None,
-    ) -> tuple[float, float]:
-        """Return airspeed and angle of attack."""
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample a world flow field at the CG and aerodynamic strips."""
 
         x = as_state(state)
         c_wb = _c_wb_numpy(x[3], x[4], x[5])
-        r_cg_w = _WORLD_AXIS_SIGNS * x[:3]
-        wind_cg_w, _ = _sample_wind(
-            wind_model,
-            r_cg_w,
-            r_cg_w.reshape(1, 3),
-        )
-        velocity_air_b = x[6:9] - c_wb.T @ wind_cg_w
-        return (
-            float(np.linalg.norm(velocity_air_b)),
-            float(np.arctan2(velocity_air_b[2], velocity_air_b[0])),
-        )
-
-    def energy_rate(
-        self,
-        state: npt.ArrayLike,
-        wind_model: object = None,
-        rho: float = DEFAULT_RHO_KG_M3,
-    ) -> float:
-        """Return the specific mechanical-energy rate."""
-
-        x = as_state(state)
-        derivative = self(x, x[12:15], wind_model, rho)
-        return mechanical_energy_rate(x, derivative)
-
-    def _aero_loads(
-        self,
-        state: np.ndarray,
-        wind_model: object,
-        rho: float,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        x_w, y_w, z_w, phi, theta, psi = state[:6]
-        v_b = state[6:9]
-        omega_b = state[9:12]
-        surface = self.clip_control(state[12:15])
-        c_wb = _c_wb_numpy(phi, theta, psi)
         c_bw = c_wb.T
-        r_cg_w = _WORLD_AXIS_SIGNS * np.array(
-            [x_w, y_w, z_w],
-            dtype=float,
-        )
+        r_cg_w = _WORLD_AXIS_SIGNS * x[:3]
         r_strip_w = r_cg_w + self.strip_table.r_b_m @ c_wb.T
         wind_cg_w, wind_strip_w = _sample_wind(
             wind_model,
             r_cg_w,
             r_strip_w,
         )
-        wind_cg_b = c_bw @ wind_cg_w
-        wind_strip_b = wind_strip_w @ c_bw.T
-        v_air_cg_b = v_b - wind_cg_b
+        return c_bw @ wind_cg_w, wind_strip_w @ c_bw.T
+
+    def clip_control(self, control: npt.ArrayLike) -> np.ndarray:
+        """Clip aggregate control targets to surface limits."""
+
+        values = np.asarray(control, dtype=float).reshape(3)
+        return np.clip(values, self.control_lower_rad, self.control_upper_rad)
+
+    def aero_loads_local_flow(
+        self,
+        state: npt.ArrayLike,
+        center_b_m_s: npt.ArrayLike,
+        strip_b_m_s: npt.ArrayLike,
+        rho: float = DEFAULT_RHO_KG_M3,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return aerodynamic force and moment from local strip flow."""
+
+        state_array = as_state(state)
+        center_b = np.asarray(center_b_m_s, dtype=float).reshape(3)
+        strip_b = np.asarray(strip_b_m_s, dtype=float).reshape(
+            self.strip_table.r_b_m.shape
+        )
+        v_b = state_array[6:9]
+        omega_b = state_array[9:12]
+        surface = self.clip_control(state_array[12:15])
+        v_air_cg_b = v_b - center_b
         v_air_strip_b = (
             v_b
             + np.cross(
                 np.broadcast_to(omega_b, self.strip_table.r_b_m.shape),
                 self.strip_table.r_b_m,
             )
-            - wind_strip_b
+            - strip_b
         )
         span_speed = np.sum(
             v_air_strip_b * self.strip_table.span_axis_b,
             axis=1,
         )
-        v_plane_b = (
-            v_air_strip_b
-            - self.strip_table.span_axis_b * span_speed[:, None]
-        )
+        v_plane_b = v_air_strip_b - self.strip_table.span_axis_b * span_speed[:, None]
         speed_plane = np.linalg.norm(v_plane_b, axis=1)
         speed_safe = np.maximum(speed_plane, EPS)
         drag_dir_b = -v_plane_b / speed_safe[:, None]
@@ -416,28 +468,19 @@ class Aircraft:
         )
         q_bar_strip = 0.5 * rho * speed_plane**2
         force_scale = (q_bar_strip * self.strip_table.area_m2)[:, None]
-        f_strip_b = force_scale * (
-            cl[:, None] * lift_dir_b + cd[:, None] * drag_dir_b
-        )
+        f_strip_b = force_scale * (cl[:, None] * lift_dir_b + cd[:, None] * drag_dir_b)
         m_strip_b = np.cross(self.strip_table.r_b_m, f_strip_b)
         m_strip_b += (
-            q_bar_strip
-            * self.strip_table.area_m2
-            * self.strip_table.chord_m
-            * cm
+            q_bar_strip * self.strip_table.area_m2 * self.strip_table.chord_m * cm
         )[:, None] * self.strip_table.moment_axis_b
         f_aero_b = np.sum(f_strip_b, axis=0)
         m_aero_b = np.sum(m_strip_b, axis=0)
         speed_cg = float(np.linalg.norm(v_air_cg_b))
         if speed_cg > EPS:
             f_aero_b += (
-                -0.5
-                * rho
-                * self.config.drag_area_fuse_m2
-                * speed_cg
-                * v_air_cg_b
+                -0.5 * rho * self.config.drag_area_fuse_m2 * speed_cg * v_air_cg_b
             )
-        return c_wb, f_aero_b, m_aero_b
+        return f_aero_b, m_aero_b
 
 
 def build_aircraft(config: AircraftConfig | None = None) -> Aircraft:
@@ -450,9 +493,7 @@ def _build_strip_table(surfaces: tuple[LiftingSurface, ...]) -> _StripTable:
     rows = []
     for surface in surfaces:
         rows.extend(
-            _vertical_rows(surface)
-            if surface.vertical
-            else _horizontal_rows(surface)
+            _vertical_rows(surface) if surface.vertical else _horizontal_rows(surface)
         )
     return _StripTable(
         r_b_m=np.asarray([row["r_b_m"] for row in rows], dtype=float),
@@ -611,16 +652,15 @@ def _flat_plate_section(
     alpha0_rad: np.ndarray,
     cd0: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    a_le, a_te, alpha_le, alpha_te, alpha_high = _flat_plate_coefficients(
-        aspect_ratio
-    )
+    a_le, a_te, alpha_le, alpha_te, alpha_high = flat_plate_coefficients(aspect_ratio)
     speed = np.maximum(speed_m_s, EPS)
     cf_c = np.clip(flap_chord_fraction, 0.0, 1.0)
-    cl_alpha = 2.0 * pi * (
-        aspect_ratio
-        / (
+    cl_alpha = (
+        2.0
+        * pi
+        * (
             aspect_ratio
-            + 2.0 * (aspect_ratio + 4.0) / (aspect_ratio + 2.0)
+            / (aspect_ratio + 2.0 * (aspect_ratio + 4.0) / (aspect_ratio + 2.0))
         )
     )
     theta_f = np.arccos(2.0 * cf_c - 1.0)
@@ -631,38 +671,39 @@ def _flat_plate_section(
     alpha_lift = alpha_rad - alpha0_rad
     abs_alpha_lift = _smooth_abs(alpha_lift)
     f_te = 0.5 * (
-        1.0
-        - np.tanh(
-            a_te * (abs_alpha_lift - tau_te * alpha_dot_rad_s - alpha_te)
-        )
+        1.0 - np.tanh(a_te * (abs_alpha_lift - tau_te * alpha_dot_rad_s - alpha_te))
     )
     f_le = 0.5 * (
-        1.0
-        - np.tanh(
-            a_le * (abs_alpha_lift - tau_le * alpha_dot_rad_s - alpha_le)
-        )
+        1.0 - np.tanh(a_le * (abs_alpha_lift - tau_le * alpha_dot_rad_s - alpha_le))
     )
     sqrt_f_te = np.sqrt(np.maximum(f_te, 0.0))
     sin_alpha = np.sin(alpha_lift)
     cos_alpha = np.cos(alpha_lift)
-    cl_attached = 0.25 * (1.0 + sqrt_f_te) ** 2 * (
-        cl_alpha * sin_alpha * cos_alpha**2
-        + f_le**2 * pi * _smooth_abs(sin_alpha) * sin_alpha * cos_alpha
-    ) + delta_cl
+    cl_attached = (
+        0.25
+        * (1.0 + sqrt_f_te) ** 2
+        * (
+            cl_alpha * sin_alpha * cos_alpha**2
+            + f_le**2 * pi * _smooth_abs(sin_alpha) * sin_alpha * cos_alpha
+        )
+        + delta_cl
+    )
     cd_attached = cd0 + cl_attached * _safe_tan(alpha_lift)
-    cm_attached = -0.25 * (1.0 + sqrt_f_te) ** 2 * (
-        0.0625
-        * (-1.0 + 6.0 * sqrt_f_te - 5.0 * f_te)
-        * cl_alpha
-        * sin_alpha
-        * cos_alpha
-        + 0.17 * f_le**2 * pi * _smooth_abs(sin_alpha) * sin_alpha
+    cm_attached = (
+        -0.25
+        * (1.0 + sqrt_f_te) ** 2
+        * (
+            0.0625
+            * (-1.0 + 6.0 * sqrt_f_te - 5.0 * f_te)
+            * cl_alpha
+            * sin_alpha
+            * cos_alpha
+            + 0.17 * f_le**2 * pi * _smooth_abs(sin_alpha) * sin_alpha
+        )
     )
     cf = cf_c * chord_m
     c_prime = np.sqrt(
-        (chord_m - cf) ** 2
-        + cf**2
-        + 2.0 * cf * (chord_m - cf) * np.cos(delta_f_rad)
+        (chord_m - cf) ** 2 + cf**2 + 2.0 * cf * (chord_m - cf) * np.cos(delta_f_rad)
     )
     alpha_f = np.arcsin(
         np.clip(cf * np.sin(delta_f_rad) / np.maximum(c_prime, EPS), -1.0, 1.0)
@@ -671,18 +712,15 @@ def _flat_plate_section(
     cd_90 = 1.98 - 4.26e-2 * delta_f_rad**2 + 2.1e-1 * delta_f_rad
     sin_ps = np.sin(alpha_ps)
     cos_ps = np.cos(alpha_ps)
-    normal_gain = (
-        1.0 / (0.56 + 0.44 * _smooth_abs(sin_ps))
-        - 0.41 * (1.0 - np.exp(-17.0 / aspect_ratio))
+    normal_gain = 1.0 / (0.56 + 0.44 * _smooth_abs(sin_ps)) - 0.41 * (
+        1.0 - np.exp(-17.0 / aspect_ratio)
     )
     cn = cd_90 * sin_ps * normal_gain
     ca = 0.5 * 0.03 * cos_ps
     cl_post = cn * cos_ps - ca * sin_ps
     cd_post = cn * sin_ps + ca * cos_ps
     cm_post = -cn * (0.25 - 0.175 * (1.0 - 2.0 * alpha_ps / pi))
-    sigma = 0.5 * (
-        1.0 + np.tanh(20.0 * (alpha_high - _smooth_abs(alpha_rad)))
-    )
+    sigma = 0.5 * (1.0 + np.tanh(20.0 * (alpha_high - _smooth_abs(alpha_rad))))
     cl = sigma * cl_attached + (1.0 - sigma) * cl_post
     cd = sigma * cd_attached + (1.0 - sigma) * cd_post
     cm = sigma * cm_attached + (1.0 - sigma) * cm_post
@@ -766,6 +804,4 @@ def _smooth_abs(value: np.ndarray) -> np.ndarray:
 
 
 def _safe_tan(angle_rad: np.ndarray) -> np.ndarray:
-    return np.tan(
-        np.clip(angle_rad, -0.5 * pi + 1.0e-6, 0.5 * pi - 1.0e-6)
-    )
+    return np.tan(np.clip(angle_rad, -0.5 * pi + 1.0e-6, 0.5 * pi - 1.0e-6))
