@@ -18,13 +18,13 @@ from models.geometry import (
 class Gate:
     """Rectangular mission gate in public z-up world axes."""
 
+    geometry: RigidBodyGeometry
     center_w_m: Vector3 = (6.6, 2.2, 1.4)
     normal_w: Vector3 = (1.0, 0.0, 0.0)
     width_axis_w: Vector3 = (0.0, 1.0, 0.0)
     width_m: float = 1.2
     height_m: float = 0.5
     margin_m: float = 0.0
-    geometry: RigidBodyGeometry = RigidBodyGeometry()
 
     def __post_init__(self) -> None:
         normal, width, _ = orthogonal_axes(self.normal_w, self.width_axis_w)

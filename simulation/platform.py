@@ -19,6 +19,7 @@ from models.geometry import (
 class Platform:
     """Finite planar landing platform in public z-up world axes."""
 
+    geometry: RigidBodyGeometry
     center_w_m: Vector3 = (6.0, 2.2, 1.0)
     length_axis_w: Vector3 = (1.0, 0.0, 0.0)
     width_axis_w: Vector3 = (0.0, 1.0, 0.0)
@@ -29,7 +30,6 @@ class Platform:
     roll_max_rad: float = radians(20)
     pitch_bounds_rad: tuple[float, float] = (radians(-10), radians(25))
     margin_m: float = 0.0
-    geometry: RigidBodyGeometry = RigidBodyGeometry()
 
     def __post_init__(self) -> None:
         length, width, _ = orthogonal_axes(
