@@ -8,61 +8,21 @@ from math import cos, sin
 import numpy as np
 import numpy.typing as npt
 
-from models.aircraft import LiftingSurface, default_aircraft_config
 from models.state import as_state
 
 Vector3 = tuple[float, float, float]
 
 
-def _surface_vertices(surface: LiftingSurface) -> np.ndarray:
-    root = np.asarray(surface.root_le_b_m, dtype=float)
-    chord = np.array([-surface.chord_m, 0.0, 0.0])
-    if surface.vertical:
-        tip = np.array([0.0, 0.0, -surface.span_m])
-        return np.array([root, root + chord, root + tip, root + tip + chord])
-
-    semispan = 0.5 * surface.span_m if surface.symmetric else surface.span_m
-    vertices = [root, root + chord]
-    side_signs = (1.0, -1.0) if surface.symmetric else (1.0,)
-    for side_sign in side_signs:
-        tip = np.array(
-            [
-                0.0,
-                side_sign * semispan * cos(surface.dihedral_rad),
-                -semispan * sin(surface.dihedral_rad),
-            ]
-        )
-        vertices.extend((root + tip, root + tip + chord))
-    return np.asarray(vertices)
-
-
-def _surface_corners() -> np.ndarray:
-    surfaces = default_aircraft_config().surfaces
-    return np.vstack([_surface_vertices(surface) for surface in surfaces])
-
-
-_SURFACE_CORNERS_B_M = _surface_corners()
-_DEFAULT_BODY_B_M = tuple(
-    tuple(float(value) for value in point) for point in _SURFACE_CORNERS_B_M
-)
-_LOWEST_SURFACE_Z_B_M = float(np.max(_SURFACE_CORNERS_B_M[:, 2]))
-_DEFAULT_CONTACT_B_M = tuple(
-    tuple(float(value) for value in point)
-    for point in _SURFACE_CORNERS_B_M[
-        np.isclose(_SURFACE_CORNERS_B_M[:, 2], _LOWEST_SURFACE_Z_B_M)
-    ]
-)
-
-
 @dataclass(frozen=True)
 class RigidBodyGeometry:
-    """Finite body, first-contact, and landing-footprint vertices."""
+    """Explicit full-body, first-contact, and landing-footprint vertices."""
 
-    body_b_m: npt.ArrayLike = _DEFAULT_BODY_B_M
-    contact_b_m: npt.ArrayLike = _DEFAULT_CONTACT_B_M
-    footprint_b_m: npt.ArrayLike = _DEFAULT_BODY_B_M
+    body_b_m: npt.ArrayLike
+    contact_b_m: npt.ArrayLike
+    footprint_b_m: npt.ArrayLike
 
     def __post_init__(self) -> None:
+        points = {}
         for name in ("body_b_m", "contact_b_m", "footprint_b_m"):
             value = np.asarray(getattr(self, name), dtype=float).reshape(-1, 3)
             if value.size == 0 or not np.all(np.isfinite(value)):
@@ -70,6 +30,16 @@ class RigidBodyGeometry:
             value = value.copy()
             value.flags.writeable = False
             object.__setattr__(self, name, value)
+            points[name] = value
+        body = points["body_b_m"]
+        for name in ("contact_b_m", "footprint_b_m"):
+            if not np.all(
+                np.any(
+                    np.all(points[name][:, None, :] == body[None, :, :], axis=2),
+                    axis=1,
+                )
+            ):
+                raise ValueError(f"{name} must be a subset of body_b_m")
 
 
 def world_points(state: npt.ArrayLike, points_b_m: npt.ArrayLike) -> np.ndarray:
