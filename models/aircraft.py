@@ -133,7 +133,7 @@ class LiftingSurface:
 
 @dataclass(frozen=True)
 class AircraftConfig:
-    """Physical constants and geometry used to build an aircraft plug-in."""
+    """Physical constants and geometry for one aircraft model."""
 
     mass_kg: float
     inertia_b_kg_m2: npt.ArrayLike
@@ -481,12 +481,6 @@ class Aircraft:
                 -0.5 * rho * self.config.drag_area_fuse_m2 * speed_cg * v_air_cg_b
             )
         return f_aero_b, m_aero_b
-
-
-def build_aircraft(config: AircraftConfig | None = None) -> Aircraft:
-    """Build a reusable aircraft plug-in instance."""
-
-    return Aircraft(default_aircraft_config() if config is None else config)
 
 
 def _build_strip_table(surfaces: tuple[LiftingSurface, ...]) -> _StripTable:
