@@ -1,28 +1,26 @@
-"""Rigid-body occupancy and contact geometry."""
+"""Rigid-body occupancy, contact, and terminal-event geometry."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import cos, sin
+from math import asin, atan2, cos, sin
 
 import numpy as np
 import numpy.typing as npt
 
 from models.state import as_state
 
-Vector3 = tuple[float, float, float]
-
 
 @dataclass(frozen=True)
 class RigidBodyGeometry:
-    """Explicit full-body, first-contact, and landing-footprint vertices."""
+    """Explicit full-body, permitted-contact, and footprint vertices."""
 
     body_b_m: npt.ArrayLike
     contact_b_m: npt.ArrayLike
     footprint_b_m: npt.ArrayLike
 
     def __post_init__(self) -> None:
-        points = {}
+        arrays = {}
         for name in ("body_b_m", "contact_b_m", "footprint_b_m"):
             value = np.asarray(getattr(self, name), dtype=float).reshape(-1, 3)
             if value.size == 0 or not np.all(np.isfinite(value)):
@@ -30,24 +28,24 @@ class RigidBodyGeometry:
             value = value.copy()
             value.flags.writeable = False
             object.__setattr__(self, name, value)
-            points[name] = value
-        body = points["body_b_m"]
+            arrays[name] = value
+
+        body = arrays["body_b_m"]
         for name in ("contact_b_m", "footprint_b_m"):
-            if not np.all(
-                np.any(
-                    np.all(points[name][:, None, :] == body[None, :, :], axis=2),
-                    axis=1,
-                )
-            ):
+            members = np.any(
+                np.all(arrays[name][:, None] == body[None, :], axis=2),
+                axis=1,
+            )
+            if not np.all(members):
                 raise ValueError(f"{name} must be a subset of body_b_m")
 
 
 def world_points(state: npt.ArrayLike, points_b_m: npt.ArrayLike) -> np.ndarray:
     """Return body-fixed points in the public world frame."""
 
-    x = as_state(state)
+    value = as_state(state)
     points = np.asarray(points_b_m, dtype=float).reshape(-1, 3)
-    return x[:3] + points @ body_to_world(x[3:6]).T
+    return value[:3] + points @ body_to_world(value[3:6]).T
 
 
 def point_velocities(
@@ -56,135 +54,165 @@ def point_velocities(
 ) -> np.ndarray:
     """Return world velocities of body-fixed points."""
 
-    x = as_state(state)
+    value = as_state(state)
     points = np.asarray(points_b_m, dtype=float).reshape(-1, 3)
-    velocity_b = x[6:9] + np.cross(x[9:12], points)
-    return velocity_b @ body_to_world(x[3:6]).T
+    velocity_b = value[6:9] + np.cross(value[9:12], points)
+    return velocity_b @ body_to_world(value[3:6]).T
 
 
 def gate_crossing(
     states: npt.ArrayLike,
     geometry: RigidBodyGeometry,
-    center_w_m: Vector3,
-    normal_w: Vector3,
-    width_axis_w: Vector3,
+    center_w_m: npt.ArrayLike,
+    normal_w: npt.ArrayLike,
+    width_axis_w: npt.ArrayLike,
     width_m: float,
     height_m: float,
-    margin_m: float,
+    frame_clearance_m: float,
+    body_inflation_m: float,
+    position_error_m: float,
+    attitude_error_rad: float,
 ) -> bool:
-    """Return whether a realized dense trajectory passes through a gate."""
+    """Return whether a dense realized trajectory clears a gate."""
 
     trajectory = _trajectory(states)
-    body = np.asarray(geometry.body_b_m, dtype=float).reshape(-1, 3)
-    center = np.asarray(center_w_m, dtype=float)
-    normal = np.asarray(normal_w, dtype=float)
-    width_axis = np.asarray(width_axis_w, dtype=float)
-    height_axis = np.cross(normal, width_axis)
+    body = geometry.body_b_m
+    center = np.asarray(center_w_m, dtype=float).reshape(3)
+    normal, width_axis, height_axis = orthogonal_axes(normal_w, width_axis_w)
+    radius = float(np.max(np.linalg.norm(body, axis=1)))
+    clearance = (
+        frame_clearance_m
+        + body_inflation_m
+        + position_error_m
+        + radius * attitude_error_rad
+    )
+    half_width = 0.5 * width_m - clearance
+    half_height = 0.5 * height_m - clearance
     swept = np.stack([world_points(state, body) for state in trajectory])
     plane_distance = (swept - center) @ normal
-    if np.max(plane_distance[0]) >= 0.0 or np.min(plane_distance[-1]) <= 0.0:
+
+    if np.max(plane_distance[0]) + clearance >= 0.0:
         return False
-    if (trajectory[-1, :3] - center) @ normal <= (trajectory[0, :3] - center) @ normal:
+    if np.min(plane_distance[-1]) - clearance <= 0.0:
         return False
-    intersects = (plane_distance.min(axis=1) <= 0.0) & (
-        plane_distance.max(axis=1) >= 0.0
-    )
-    if not np.any(intersects):
+    progress = (trajectory[-1, :3] - trajectory[0, :3]) @ normal
+    if progress <= 0.0:
         return False
 
-    offsets = swept[intersects] - center
-    return bool(
-        np.max(np.abs(offsets @ width_axis)) <= 0.5 * width_m - margin_m
-        and np.max(np.abs(offsets @ height_axis)) <= 0.5 * height_m - margin_m
-    )
+    crossing = False
+    for index in range(trajectory.shape[0] - 1):
+        distance = plane_distance[index : index + 2]
+        if np.min(distance) > clearance or np.max(distance) < -clearance:
+            continue
+        crossing = True
+        offsets = swept[index : index + 2] - center
+        if np.max(np.abs(offsets @ width_axis)) > half_width:
+            return False
+        if np.max(np.abs(offsets @ height_axis)) > half_height:
+            return False
+    return crossing
 
 
 def platform_landing(
     states: npt.ArrayLike,
     geometry: RigidBodyGeometry,
-    center_w_m: Vector3,
-    length_axis_w: Vector3,
-    width_axis_w: Vector3,
+    center_w_m: npt.ArrayLike,
+    length_axis_w: npt.ArrayLike,
+    width_axis_w: npt.ArrayLike,
     length_m: float,
     width_m: float,
     normal_speed_max_m_s: float,
-    contact_speed_max_m_s: float,
-    roll_max_rad: float,
-    pitch_bounds_rad: tuple[float, float],
-    margin_m: float,
+    tangential_speed_max_m_s: float,
+    roll_abs_max_rad: float,
+    pitch_error_abs_max_rad: float,
+    touchdown_pitch_rad: float,
+    platform_clearance_m: float,
+    body_inflation_m: float,
+    position_error_m: float,
+    attitude_error_rad: float,
 ) -> bool:
-    """Return whether realized, event-located first contact is admissible."""
+    """Return whether event-located first contact is admissible."""
 
     trajectory = _trajectory(states)
-    body = np.asarray(geometry.body_b_m, dtype=float).reshape(-1, 3)
-    contact = np.asarray(geometry.contact_b_m, dtype=float).reshape(-1, 3)
-    footprint_b = np.asarray(geometry.footprint_b_m, dtype=float).reshape(-1, 3)
-    center = np.asarray(center_w_m, dtype=float)
-    length_axis = np.asarray(length_axis_w, dtype=float)
-    width_axis = np.asarray(width_axis_w, dtype=float)
-    normal = np.cross(length_axis, width_axis)
+    body = geometry.body_b_m
+    contact = geometry.contact_b_m
+    footprint = geometry.footprint_b_m
+    center = np.asarray(center_w_m, dtype=float).reshape(3)
+    length_axis, width_axis, normal = orthogonal_axes(
+        length_axis_w,
+        width_axis_w,
+    )
+    radius = float(np.max(np.linalg.norm(body, axis=1)))
+    clearance = (
+        platform_clearance_m
+        + body_inflation_m
+        + position_error_m
+        + radius * attitude_error_rad
+    )
 
-    contact_heights = np.stack(
+    heights = np.stack(
         [(world_points(state, contact) - center) @ normal for state in trajectory]
     )
-    if np.min(contact_heights[0]) <= 0.0:
+    minimum = np.min(heights, axis=1)
+    if minimum[0] <= clearance:
         return False
-    contacts = np.flatnonzero(np.min(contact_heights, axis=1) <= 0.0)
-    if contacts.size == 0:
+    candidates = np.flatnonzero((minimum[:-1] > clearance) & (minimum[1:] <= clearance))
+    if candidates.size == 0:
         return False
-    contact_index = int(contacts[0])
-    touchdown = trajectory[contact_index]
-    if any(
-        np.min((world_points(state, body) - center) @ normal) <= 0.0
-        for state in trajectory[:contact_index]
-    ):
-        return False
-    touchdown_heights = contact_heights[contact_index]
-    if np.min(touchdown_heights) < -1.0e-9:
-        return False
+    segment = int(candidates[0])
+
+    forbidden = _noncontact_points(body, contact)
+    for state in trajectory[: segment + 1]:
+        if forbidden.size:
+            forbidden_height = (world_points(state, forbidden) - center) @ normal
+            if np.min(forbidden_height) <= clearance:
+                return False
+
+    touchdown = _contact_state(
+        trajectory[segment],
+        trajectory[segment + 1],
+        contact,
+        center,
+        normal,
+        clearance,
+    )
+    contact_height = (world_points(touchdown, contact) - center) @ normal
     first_contact = np.isclose(
-        touchdown_heights,
-        np.min(touchdown_heights),
+        contact_height,
+        np.min(contact_height),
         atol=1.0e-9,
         rtol=0.0,
     )
-    noncontact = np.array(
-        [point for point in body if not np.any(np.all(point == contact, axis=1))]
+    if forbidden.size:
+        forbidden_height = (world_points(touchdown, forbidden) - center) @ normal
+        if np.min(forbidden_height) <= clearance:
+            return False
+
+    contact_velocity = point_velocities(touchdown, contact[first_contact])
+    normal_speed = -(contact_velocity @ normal)
+    tangent = contact_velocity + normal_speed[:, None] * normal
+    footprint_offset = world_points(touchdown, footprint) - center
+    roll, pitch, _ = relative_attitude(
+        touchdown[3:6],
+        length_axis,
+        width_axis,
     )
-    if (
-        noncontact.size
-        and np.min((world_points(touchdown, noncontact) - center) @ normal) <= 0.0
-    ):
-        return False
-    contact_velocities = point_velocities(
-        touchdown,
-        contact[first_contact],
-    )
-    normal_speed = float(np.max(-contact_velocities @ normal))
-    contact_speed = float(np.max(np.linalg.norm(contact_velocities, axis=1)))
-    footprint = world_points(touchdown, footprint_b) - center
-    phi, theta = touchdown[3:5]
     return bool(
-        np.max(np.abs(footprint @ length_axis)) <= 0.5 * length_m - margin_m
-        and np.max(np.abs(footprint @ width_axis)) <= 0.5 * width_m - margin_m
-        and 0.0 <= normal_speed <= normal_speed_max_m_s
-        and contact_speed <= contact_speed_max_m_s
-        and abs(float(phi)) <= roll_max_rad
-        and pitch_bounds_rad[0] <= float(theta) <= pitch_bounds_rad[1]
+        np.max(np.abs(footprint_offset @ length_axis)) <= 0.5 * length_m - clearance
+        and np.max(np.abs(footprint_offset @ width_axis)) <= 0.5 * width_m - clearance
+        and np.min(normal_speed) >= 0.0
+        and np.max(normal_speed) <= normal_speed_max_m_s
+        and np.max(np.linalg.norm(tangent, axis=1)) <= tangential_speed_max_m_s
+        and abs(roll) + attitude_error_rad <= roll_abs_max_rad
+        and abs(pitch - touchdown_pitch_rad) + attitude_error_rad
+        <= pitch_error_abs_max_rad
     )
-
-
-def _trajectory(states: npt.ArrayLike) -> np.ndarray:
-    values = np.asarray(states, dtype=float)
-    if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] != 15:
-        raise ValueError("realized trajectory must contain at least two states")
-    return values
 
 
 def body_to_world(attitude_rad: npt.ArrayLike) -> np.ndarray:
     """Return the body-to-world rotation for the right-handed z-up frame."""
 
-    phi, theta, psi = np.asarray(attitude_rad, dtype=float)
+    phi, theta, psi = np.asarray(attitude_rad, dtype=float).reshape(3)
     c_phi, s_phi = cos(phi), sin(phi)
     c_theta, s_theta = cos(theta), sin(theta)
     c_psi, s_psi = cos(psi), sin(psi)
@@ -201,9 +229,27 @@ def body_to_world(attitude_rad: npt.ArrayLike) -> np.ndarray:
                 -c_phi * s_theta * s_psi + s_phi * c_psi,
             ],
             [s_theta, -s_phi * c_theta, -c_phi * c_theta],
-        ],
-        dtype=float,
+        ]
     )
+
+
+def relative_attitude(
+    attitude_rad: npt.ArrayLike,
+    forward_axis_w: npt.ArrayLike,
+    lateral_axis_w: npt.ArrayLike,
+) -> tuple[float, float, float]:
+    """Return roll, pitch, and heading relative to a mission frame."""
+
+    forward, lateral, normal = orthogonal_axes(
+        forward_axis_w,
+        lateral_axis_w,
+    )
+    desired = np.column_stack((forward, -lateral, -normal))
+    relative = desired.T @ body_to_world(attitude_rad)
+    pitch = asin(float(np.clip(-relative[2, 0], -1.0, 1.0)))
+    roll = atan2(float(relative[2, 1]), float(relative[2, 2]))
+    heading = atan2(float(relative[1, 0]), float(relative[0, 0]))
+    return roll, pitch, heading
 
 
 def orthogonal_axes(
@@ -213,15 +259,44 @@ def orthogonal_axes(
     """Return normalized right-handed axes from two input directions."""
 
     first = np.asarray(first_axis, dtype=float).reshape(3)
-    first_norm = float(np.linalg.norm(first))
-    if first_norm == 0.0:
-        raise ValueError("first axis must be nonzero")
-    first = first / first_norm
-
+    first = first / np.linalg.norm(first)
     second = np.asarray(second_axis, dtype=float).reshape(3)
     second = second - float(second @ first) * first
-    second_norm = float(np.linalg.norm(second))
-    if second_norm == 0.0:
-        raise ValueError("axes must not be parallel")
-    second = second / second_norm
+    second = second / np.linalg.norm(second)
     return first, second, np.cross(first, second)
+
+
+def _trajectory(states: npt.ArrayLike) -> np.ndarray:
+    values = np.asarray(states, dtype=float)
+    if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] != 15:
+        raise ValueError("realized trajectory must contain at least two states")
+    return values
+
+
+def _noncontact_points(body: np.ndarray, contact: np.ndarray) -> np.ndarray:
+    permitted = np.any(
+        np.all(body[:, None] == contact[None, :], axis=2),
+        axis=1,
+    )
+    return body[~permitted]
+
+
+def _contact_state(
+    first: np.ndarray,
+    second: np.ndarray,
+    contact: np.ndarray,
+    center: np.ndarray,
+    normal: np.ndarray,
+    clearance: float,
+) -> np.ndarray:
+    lower = 0.0
+    upper = 1.0
+    for _ in range(48):
+        fraction = 0.5 * (lower + upper)
+        state = first + fraction * (second - first)
+        height: float = float(np.min((world_points(state, contact) - center) @ normal))
+        if height > clearance:
+            lower = fraction
+        else:
+            upper = fraction
+    return first + upper * (second - first)
