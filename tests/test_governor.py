@@ -9,7 +9,6 @@ from unittest.mock import patch
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, minimize
 
-from control.capture import ActiveSets, _feasible_active_sets
 from control.governor import (
     SMOOTHING_WEIGHT,
     TRACKING_WEIGHT,
@@ -26,14 +25,11 @@ def _solve(
     previous: np.ndarray | tuple[float, float, float],
     matrix: np.ndarray,
     bounds: np.ndarray,
+    backup: np.ndarray | tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> np.ndarray:
     result = np.empty(3)
-    active_sets = _feasible_active_sets(
-        matrix,
-        bounds,
-        solver._center - solver._scale,
-        solver._center + solver._scale,
-    )
+    if isinstance(backup, tuple) and backup == (0.0, 0.0, 0.0):
+        backup = solver._center
     assert (
         solver.solve_into(
             nominal,
@@ -41,18 +37,15 @@ def _solve(
             matrix,
             bounds,
             result,
-            active_sets,
+            backup,
         )
         == _SOLVED
     )
     return result
 
 
-_EMPTY_ACTIVE_SETS = ActiveSets((), (), ())
-
-
 class GovernorSolverTests(TestCase):
-    """Verify bounded active-set solutions against independent optimisation."""
+    """Verify online active-set solutions against independent optimisation."""
 
     def test_fixed_weights_and_unmodified_nominal_reference(self) -> None:
         """Keep an admissible nominal reference when it is also previous."""
@@ -92,7 +85,7 @@ class GovernorSolverTests(TestCase):
         bounds = np.array((0.0,))
         nominal = np.array((5.0e-11, 0.0, 0.0))
 
-        result = _solve(solver, nominal, nominal, matrix, bounds)
+        result = _solve(solver, nominal, nominal, matrix, bounds, (-0.5, 0.0, 0.0))
 
         assert result[0] <= 0.0
         assert np.all(matrix @ result <= bounds)
@@ -133,7 +126,7 @@ class GovernorSolverTests(TestCase):
                 np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]),
                 np.array([-0.5, -0.5]),
                 result,
-                _EMPTY_ACTIVE_SETS,
+                np.zeros(3),
             ),
             _INFEASIBLE,
         )
@@ -172,7 +165,7 @@ class GovernorSolverTests(TestCase):
                 np.empty((0, 3)),
                 np.empty(0),
                 result,
-                _EMPTY_ACTIVE_SETS,
+                np.zeros(3),
                 perf_counter(),
             ),
             _TIMED_OUT,
@@ -191,7 +184,7 @@ class GovernorSolverTests(TestCase):
                 np.zeros((1, 3)),
                 np.ones(1),
                 result,
-                _EMPTY_ACTIVE_SETS,
+                np.zeros(3),
                 perf_counter() + 1.0,
             )
         self.assertEqual(status, _TIMED_OUT)
@@ -230,6 +223,7 @@ class GovernorSolverTests(TestCase):
                     previous,
                     physical_a,
                     physical_b,
+                    center + scale * witness,
                 )
                 expected = self._trusted_solution(
                     constraints,
@@ -244,19 +238,13 @@ class GovernorSolverTests(TestCase):
                 self.assertTrue(np.all(constraints @ actual_y <= limits + 1.0e-9))
                 self.assertTrue(np.all(np.abs(actual_y) <= 1.0 + 1.0e-9))
 
-    def test_precomputed_active_sets_scale_to_many_facets(self) -> None:
+    def test_online_active_set_scales_to_many_facets(self) -> None:
         rng = np.random.default_rng(9137)
         constraints = rng.normal(size=(96, 3))
         constraints /= np.linalg.norm(constraints, axis=1)[:, None]
         limits = np.full(96, 0.8)
         lower = -np.ones(3)
         upper = np.ones(3)
-        active = _feasible_active_sets(
-            constraints,
-            limits,
-            lower,
-            upper,
-        )
         solver = GovernorSolver(lower, upper, constraints.shape[0])
         result = np.empty(3)
         for case in range(32):
@@ -269,7 +257,7 @@ class GovernorSolverTests(TestCase):
                     constraints,
                     limits,
                     result,
-                    active_sets=active,
+                    backup=np.zeros(3),
                 )
                 self.assertEqual(status, 1)
                 expected = self._trusted_solution(
@@ -281,19 +269,12 @@ class GovernorSolverTests(TestCase):
                 )
                 np.testing.assert_allclose(result, expected, atol=3.0e-7)
 
-    def test_active_sets_store_and_solve_each_degenerate_vertex_once(self) -> None:
+    def test_online_active_set_handles_a_degenerate_vertex(self) -> None:
         facet_count = 24
         angles = 2.0 * np.pi * np.arange(facet_count) / facet_count
         sides = np.column_stack((np.cos(angles), np.sin(angles), np.ones(facet_count)))
         constraints = np.vstack((sides, (0.0, 0.0, -1.0)))
         limits = np.ones(facet_count + 1)
-        active = _feasible_active_sets(
-            constraints,
-            limits,
-            -3.0 * np.ones(3),
-            3.0 * np.ones(3),
-        )
-        self.assertLessEqual(active.vertices.shape[0], facet_count + 1)
         solver = GovernorSolver(
             -3.0 * np.ones(3),
             3.0 * np.ones(3),
@@ -306,9 +287,13 @@ class GovernorSolverTests(TestCase):
             constraints,
             limits,
             result,
-            active_sets=active,
+            backup=np.zeros(3),
         )
-        self.assertEqual(status, 1)
+        self.assertEqual(
+            status,
+            1,
+            (solver._iterate.copy(), solver._active[: solver._active_count].copy()),
+        )
         np.testing.assert_allclose(result, (0.0, 0.0, 1.0), atol=1.0e-12)
 
     def _trusted_solution(

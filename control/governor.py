@@ -8,7 +8,11 @@ from time import perf_counter
 import numpy as np
 import numpy.typing as npt
 
-from control.capture import POLYTOPE_TOLERANCE, ActiveSets, CaptureCertificate
+from control.capture import (
+    POLYTOPE_TOLERANCE,
+    CaptureCertificate,
+    CaptureConstraintBuilder,
+)
 from control.predictor import FastPredictor, GeneratedAircraft
 from control.uncertainty import NEXT_UPDATE_STAGE, PREDICTION_STAGES
 
@@ -20,6 +24,7 @@ _RANK_TOLERANCE = 64.0 * np.finfo(float).eps
 _INFEASIBLE = -1
 _TIMED_OUT = 0
 _SOLVED = 1
+_CONTINUE = 2
 
 
 class _StateBelief:
@@ -62,9 +67,12 @@ class GovernorSolver:
         self._previous = np.empty(3)
         self._unconstrained = np.empty(3)
         self._candidate = np.empty(3)
-        self._best = np.empty(3)
-        self._best_cost = 0.0
-        self._has_best = False
+        self._iterate = np.empty(3)
+        self._active: np.ndarray = np.empty(3, dtype=int)
+        self._gram = np.empty((3, 3))
+        self._rhs = np.empty(3)
+        self._multipliers = np.empty(3)
+        self._active_count = 0
         self._deadline: float | None = None
         self._timed_out = False
 
@@ -75,7 +83,7 @@ class GovernorSolver:
         a: np.ndarray,
         b: np.ndarray,
         result: np.ndarray,
-        active_sets: ActiveSets,
+        backup: npt.ArrayLike,
         deadline: float | None = None,
     ) -> int:
         """Write the optimal reference and return a fixed runtime status."""
@@ -111,27 +119,22 @@ class GovernorSolver:
             self._result_into(self._unconstrained, result)
             return _SOLVED
 
-        self._has_best = False
-        for active in active_sets.one:
-            if _deadline_reached(deadline):
-                return _TIMED_OUT
-            self._solve_one(int(active[0]), row_count)
-        for active in active_sets.two:
-            if _deadline_reached(deadline):
-                return _TIMED_OUT
-            self._solve_two(int(active[0]), int(active[1]), row_count)
-        for vertex in active_sets.vertices:
-            if _deadline_reached(deadline):
-                return _TIMED_OUT
-            self._candidate[:] = vertex
-            self._consider_feasible()
-
-        if _deadline_reached(deadline):
-            return _TIMED_OUT
-        if not self._has_best:
+        self._normalise_reference(backup, self._iterate)
+        if not self._feasible(self._iterate, row_count):
             return _INFEASIBLE
-        self._result_into(self._best, result)
-        return _SOLVED
+        self._active_count = 0
+        for _ in range(8 * row_count + 16):
+            if _deadline_reached(deadline):
+                return _TIMED_OUT
+            status = self._active_step(row_count)
+            if status == _SOLVED:
+                self._result_into(self._iterate, result)
+                return _SOLVED
+            if status == _TIMED_OUT:
+                return _TIMED_OUT
+            if status == _INFEASIBLE:
+                return _INFEASIBLE
+        return _TIMED_OUT
 
     def _prepare_constraints(
         self,
@@ -172,68 +175,128 @@ class GovernorSolver:
         np.subtract(reference, self._center, out=result)
         result /= self._scale
 
-    def _solve_one(self, first: int, row_count: int) -> None:
-        a0 = self._a[first]
-        # The scalar normalized Hessian cancels from the projected KKT system.
-        m00 = float(a0 @ a0)
-        if m00 <= _RANK_TOLERANCE:
-            return
-        rhs0 = float(a0 @ self._unconstrained - self._b[first])
-        multiplier0 = rhs0 / m00
-        if multiplier0 < 0.0:
-            return
-        for axis in range(3):
-            self._candidate[axis] = self._unconstrained[axis] - a0[axis] * multiplier0
-        self._consider(row_count)
+    def _active_step(self, row_count: int) -> int:
+        if self._active_count and self._stationary(row_count):
+            return _SOLVED
+        if self._timed_out:
+            return _TIMED_OUT
+        np.subtract(self._unconstrained, self._iterate, out=self._candidate)
+        if self._active_count:
+            active = self._active[: self._active_count]
+            rows = self._a[active]
+            gram = self._gram[: self._active_count, : self._active_count]
+            np.matmul(rows, rows.T, out=gram)
+            rhs = self._rhs[: self._active_count]
+            np.matmul(rows, self._candidate, out=rhs)
+            try:
+                multipliers = np.linalg.solve(gram, rhs)
+            except np.linalg.LinAlgError:
+                return _INFEASIBLE
+            self._multipliers[: self._active_count] = multipliers
+            self._candidate -= rows.T @ multipliers
 
-    def _solve_two(self, first: int, second: int, row_count: int) -> None:
-        a0 = self._a[first]
-        a1 = self._a[second]
-        m00 = float(a0 @ a0)
-        m01 = float(a0 @ a1)
-        m11 = float(a1 @ a1)
-        determinant = m00 * m11 - m01 * m01
-        if determinant <= _RANK_TOLERANCE * m00 * m11:
-            return
+        if float(self._candidate @ self._candidate) <= _RANK_TOLERANCE**2:
+            if not self._active_count:
+                return _SOLVED
+            multipliers = self._multipliers[: self._active_count]
+            remove = int(np.argmin(multipliers))
+            if multipliers[remove] >= -POLYTOPE_TOLERANCE:
+                return _SOLVED
+            self._remove_active(remove)
+            return _CONTINUE
 
-        rhs0 = float(a0 @ self._unconstrained - self._b[first])
-        rhs1 = float(a1 @ self._unconstrained - self._b[second])
-        multiplier0 = (m11 * rhs0 - m01 * rhs1) / determinant
-        multiplier1 = (m00 * rhs1 - m01 * rhs0) / determinant
-        if multiplier0 < 0.0 or multiplier1 < 0.0:
-            return
-        for axis in range(3):
-            self._candidate[axis] = self._unconstrained[axis] - (
-                a0[axis] * multiplier0 + a1[axis] * multiplier1
-            )
-        self._consider(row_count)
+        step = 1.0
+        blocker = -1
+        for index in range(row_count):
+            if index % 16 == 0 and _deadline_reached(self._deadline):
+                return _TIMED_OUT
+            if self._is_active(index):
+                continue
+            rate = float(self._a[index] @ self._candidate)
+            if rate <= _RANK_TOLERANCE:
+                continue
+            distance = float(self._b[index] - self._a[index] @ self._iterate)
+            candidate = max(0.0, distance / rate)
+            if candidate < step - POLYTOPE_TOLERANCE or (
+                abs(candidate - step) <= POLYTOPE_TOLERANCE
+                and (blocker < 0 or index < blocker)
+            ):
+                step = candidate
+                blocker = index
+        self._iterate += step * self._candidate
+        if blocker < 0:
+            return _CONTINUE
+        if not self._append_active(blocker):
+            return _CONTINUE
+        return _CONTINUE
 
-    def _consider(self, row_count: int) -> None:
-        if not self._feasible(self._candidate, row_count):
-            return
-        self._consider_feasible()
+    def _stationary(self, row_count: int) -> bool:
+        gradient = self._unconstrained - self._iterate
+        tolerance = POLYTOPE_TOLERANCE
+        tight = [
+            index
+            for index in range(row_count)
+            if abs(float(self._a[index] @ self._iterate - self._b[index])) <= tolerance
+            and float(self._a[index] @ self._a[index]) > _RANK_TOLERANCE
+        ]
+        for first, first_index in enumerate(tight):
+            if first % 8 == 0 and _deadline_reached(self._deadline):
+                self._timed_out = True
+                return False
+            row = self._a[first_index]
+            multiplier = float(row @ gradient / (row @ row))
+            if (
+                multiplier >= -tolerance
+                and np.linalg.norm(gradient - multiplier * row) <= tolerance
+            ):
+                return True
+            for second in range(first + 1, len(tight)):
+                rows = self._a[[first_index, tight[second]]]
+                gram = rows @ rows.T
+                if np.linalg.det(gram) <= _RANK_TOLERANCE:
+                    continue
+                multipliers = np.linalg.solve(gram, rows @ gradient)
+                if (
+                    np.all(multipliers >= -tolerance)
+                    and np.linalg.norm(gradient - rows.T @ multipliers) <= tolerance
+                ):
+                    return True
+                for third in range(second + 1, len(tight)):
+                    rows = self._a[[first_index, tight[second], tight[third]]]
+                    determinant = float(np.linalg.det(rows))
+                    if abs(determinant) <= _RANK_TOLERANCE:
+                        continue
+                    multipliers = np.linalg.solve(rows.T, gradient)
+                    if np.all(multipliers >= -tolerance):
+                        return True
+        return False
 
-    def _consider_feasible(self) -> None:
-        difference0 = self._candidate[0] - self._unconstrained[0]
-        difference1 = self._candidate[1] - self._unconstrained[1]
-        difference2 = self._candidate[2] - self._unconstrained[2]
-        cost = (
-            0.5
-            * self._hessian
-            * (
-                difference0 * difference0
-                + difference1 * difference1
-                + difference2 * difference2
-            )
-        )
-        if (
-            not self._has_best
-            or cost < self._best_cost
-            or (cost == self._best_cost and self._lexicographically_first())
-        ):
-            self._best[:] = self._candidate
-            self._best_cost = cost
-            self._has_best = True
+    def _is_active(self, index: int) -> bool:
+        for position in range(self._active_count):
+            if self._active[position] == index:
+                return True
+        return False
+
+    def _append_active(self, index: int) -> bool:
+        row = self._a[index]
+        if self._active_count == 1:
+            first = self._a[self._active[0]]
+            if float(np.linalg.norm(np.cross(first, row))) <= _RANK_TOLERANCE:
+                return False
+        elif self._active_count == 2:
+            rows = self._a[self._active[:2]]
+            if abs(float(np.linalg.det(np.vstack((rows, row))))) <= _RANK_TOLERANCE:
+                return False
+        elif self._active_count == 3:
+            return False
+        self._active[self._active_count] = index
+        self._active_count += 1
+        return True
+
+    def _remove_active(self, position: int) -> None:
+        for index in range(position, self._active_count - 1):
+            self._active[index] = self._active[index + 1]
+        self._active_count -= 1
 
     def _feasible(self, candidate: np.ndarray, row_count: int) -> bool:
         for row in range(row_count):
@@ -243,14 +306,6 @@ class GovernorSolver:
             if self._a[row] @ candidate - self._b[row] > POLYTOPE_TOLERANCE:
                 return False
         return True
-
-    def _lexicographically_first(self) -> bool:
-        for axis in range(3):
-            if self._candidate[axis] < self._best[axis]:
-                return True
-            if self._candidate[axis] > self._best[axis]:
-                return False
-        return False
 
     def _result_into(self, normalised: np.ndarray, result: np.ndarray) -> None:
         np.multiply(normalised, self._scale, out=result)
@@ -272,8 +327,7 @@ class JointFlowCaptureGovernor:
         self._predictor = FastPredictor(generated)
         self._stage = NEXT_UPDATE_STAGE
         self._terminal_cell = False
-        self._measured_segment = np.empty((PREDICTION_STAGES + 1, 15))
-        self._measured_count = 0
+        self._measured_segment = np.empty((2, 15))
         self._augmented_center = np.empty(15 + 3 * generated.bounds.queue_length)
         self._augmented_normalized = np.empty(self._augmented_center.size)
         self._state_lower = np.empty(15)
@@ -317,7 +371,6 @@ class JointFlowCaptureGovernor:
         self._stage = NEXT_UPDATE_STAGE
         self._terminal_cell = False
         self._measured_segment[0] = measurement
-        self._measured_count = 1
         self._normalized_coordinates = np.empty(certificate.coordinate_offset.size)
         self._simplex_weights = np.empty(certificate.coordinate_offset.size + 1)
         self._backup_reference = np.empty(3)
@@ -326,6 +379,11 @@ class JointFlowCaptureGovernor:
             certificate.reference_lower,
             certificate.reference_upper,
             certificate.max_constraints,
+        )
+        self._constraint_builder = CaptureConstraintBuilder(
+            certificate.generated,
+            certificate.mission,
+            certificate.domain,
         )
         self.status = (
             "active"
@@ -340,7 +398,7 @@ class JointFlowCaptureGovernor:
         nominal_reference: npt.ArrayLike,
         deadline: float,
     ) -> np.ndarray | None:
-        """Return one command before an absolute ``perf_counter`` deadline."""
+        """Return one command under the deployment deadline contract."""
 
         if self.status != "active":
             raise RuntimeError("capture governor is not active")
@@ -451,14 +509,15 @@ class JointFlowCaptureGovernor:
     def _terminal(self, measurement: np.ndarray) -> bool:
         if not self._terminal_cell:
             return False
-        self._measured_segment[self._measured_count] = measurement
-        self._measured_count += 1
-        if self._measured_count <= PREDICTION_STAGES:
-            return False
-        realized = self.mission.realized(self._measured_segment[: self._measured_count])
+        self._measured_segment[1] = measurement
+        realized = self.mission.realized(
+            self._measured_segment,
+            self._predictor.generated,
+        )
         if realized:
             self.status = "terminal"
             return True
+        self._measured_segment[0] = measurement
         return False
 
     def _update(
@@ -478,7 +537,7 @@ class JointFlowCaptureGovernor:
             self._predictor.generated.bounds.state_estimation_abs,
             out=self._state_upper,
         )
-        domain = self.mission.approach_domain
+        domain = self.certificate.domain
         for index in range(15):
             if (
                 self._state_lower[index] < domain.lower[index]
@@ -515,17 +574,23 @@ class JointFlowCaptureGovernor:
             self.latest_belief,
             self.issued_queue,
             simplex.gain_index,
-            populate_geometry=False,
         )
-        matrix = simplex.constraint_matrix
-        bounds = simplex.constraint_bounds[0]
+        matrix, bounds = self._constraint_builder.rows(
+            self._predictor.prediction,
+            self.certificate.beta,
+            simplex.progress_m,
+            simplex.terminal,
+        )
+        if matrix.shape[0] != simplex.constraint_count:
+            self.status = "out_of_envelope"
+            return False
         status = self._solver.solve_into(
             nominal_reference,
             self.current_reference,
             matrix,
             bounds,
             self._governor_reference,
-            self.certificate.active_sets(simplex_index),
+            self._backup_reference,
             deadline,
         )
         if status == _SOLVED:
@@ -539,7 +604,7 @@ class JointFlowCaptureGovernor:
                 self.status = "out_of_envelope"
                 return False
             reference = self._governor_reference
-        elif status == _TIMED_OUT:
+        elif status in (_TIMED_OUT, _INFEASIBLE):
             reference = self._backup_reference
         else:
             self.status = "out_of_envelope"
@@ -549,7 +614,6 @@ class JointFlowCaptureGovernor:
         self.gain_index = simplex.gain_index
         self._terminal_cell = simplex.terminal
         self._measured_segment[0] = state
-        self._measured_count = 1
         return True
 
 

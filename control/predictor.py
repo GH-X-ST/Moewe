@@ -102,21 +102,6 @@ class GainCell:
 
 
 @dataclass(frozen=True)
-class RejectedCell:
-    """One normalized aircraft-domain cell excluded by generation."""
-
-    anchor: npt.ArrayLike
-    lower: npt.ArrayLike
-    upper: npt.ArrayLike
-
-    def __post_init__(self) -> None:
-        _set_array(self, "anchor", self.anchor, (15,))
-        shape = (INTRINSIC_FEEDBACK_INDICES.size,)
-        _set_array(self, "lower", self.lower, shape)
-        _set_array(self, "upper", self.upper, shape)
-
-
-@dataclass(frozen=True)
 class _AircraftModel:
     aircraft: Aircraft
     geometry: RigidBodyGeometry
@@ -126,7 +111,6 @@ class _AircraftModel:
     reference_center: npt.ArrayLike
     reference_scale: npt.ArrayLike
     cells: tuple[GainCell, ...]
-    rejected_cells: tuple[RejectedCell, ...]
 
     def __post_init__(self) -> None:
         _set_array(self, "state_scale", self.state_scale, (15,))
@@ -1257,7 +1241,6 @@ def _generate_aircraft(
     size = INTRINSIC_FEEDBACK_INDICES.size
     pending = [(-np.ones(size), np.ones(size), 0)]
     cells: list[GainCell] = []
-    rejected: list[RejectedCell] = []
     while pending:
         lower, upper, depth = pending.pop()
         center = 0.5 * (lower + upper)
@@ -1302,7 +1285,6 @@ def _generate_aircraft(
         widths = upper - lower
         split = int(np.argmax(widths))
         if depth == MAX_GAIN_CELL_DEPTH or widths[split] <= MIN_GAIN_CELL_WIDTH:
-            rejected.append(RejectedCell(state, lower - center, upper - center))
             continue
         midpoint = 0.5 * (lower[split] + upper[split])
         left_upper = upper.copy()
@@ -1320,7 +1302,6 @@ def _generate_aircraft(
         reference_center=reference_center,
         reference_scale=reference_scale,
         cells=tuple(cells),
-        rejected_cells=tuple(rejected),
     )
     if cell_verifier is None:
         return _AircraftModel(**values)

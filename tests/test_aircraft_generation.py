@@ -82,7 +82,7 @@ def test_nominal_model_cannot_claim_oracle_verification() -> None:
     assert not isinstance(generated, GeneratedAircraft)
 
 
-def test_lqr_failure_rejects_regions_instead_of_aborting(
+def test_lqr_failure_leaves_no_accepted_regions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     aircraft = Aircraft()
@@ -99,7 +99,6 @@ def test_lqr_failure_rejects_regions_instead_of_aborting(
         np.zeros(3),
     )
     assert not generated.cells
-    assert generated.rejected_cells
 
 
 def test_different_aircraft_relinearizes_with_fixed_lqr_weights() -> None:

@@ -17,7 +17,7 @@ from control.capture import (
     triangulate_box,
 )
 from control.flow import FlowBounds
-from control.missions import ApproachDomain, FreeSpace, Halfspaces
+from control.missions import CompilationDomain, FreeSpace, Halfspaces
 
 
 def _exactly_feasible(
@@ -148,11 +148,13 @@ def _compiler(
     mission: object,
 ) -> _CaptureCompiler:
     with patch("control.oracle.NonlinearOracle", return_value=_Oracle(predictor)):
-        return _CaptureCompiler(generated, predictor, mission)
+        return _CaptureCompiler(generated, predictor, mission, generated.domain)
 
 
 class _Generated:
-    def __init__(self, domain: ApproachDomain) -> None:
+    def __init__(self, domain: CompilationDomain) -> None:
+        self.domain = domain
+        self.domain_anchor = domain.center
         self.aircraft = SimpleNamespace(
             control_lower_rad=-np.ones(3),
             control_upper_rad=np.ones(3),
@@ -193,24 +195,32 @@ class _Generated:
 
 @dataclass
 class _Mission:
-    approach_domain: ApproachDomain
-    terminal_halfspaces: Halfspaces
+    terminal_set: Halfspaces
     free_space_halfspaces: Halfspaces
 
-    def error(self, state: np.ndarray) -> np.ndarray:
+    def terminal_halfspaces(self, generated: object) -> Halfspaces:
+        del generated
+        return self.terminal_set
+
+    def error(self, state: np.ndarray, generated: object) -> np.ndarray:
+        del generated
         value = np.asarray(state, dtype=float)
         return value[1:3].copy()
 
     def distance(self, state: np.ndarray) -> float:
         return float(np.asarray(state, dtype=float)[0])
 
-    def realized(self, states: np.ndarray) -> bool:
+    def realized(self, states: np.ndarray, generated: object) -> bool:
+        del generated
         return bool(np.asarray(states)[-1, 0] <= 0.0)
 
     def terminal_support_constraints(
         self,
         prediction: _Prediction,
+        generated: object,
+        domain: CompilationDomain,
     ) -> tuple[np.ndarray, np.ndarray]:
+        del generated, domain
         direction = np.zeros(15)
         direction[0] = 1.0
         offset, reference = prediction.state_support(10, direction)
@@ -218,7 +228,8 @@ class _Mission:
 
 
 class _DependentMission(_Mission):
-    def error(self, state: np.ndarray) -> np.ndarray:
+    def error(self, state: np.ndarray, generated: object) -> np.ndarray:
+        del generated
         value = np.asarray(state, dtype=float)
         return np.array((-value[0], value[1], value[2]))
 
@@ -228,8 +239,10 @@ def _error_support(
     prediction: _Prediction,
     stage: int,
     facet: np.ndarray,
+    generated: object,
+    domain: CompilationDomain,
 ) -> tuple[float, np.ndarray]:
-    del mission
+    del mission, generated, domain
     direction = np.zeros(15)
     direction[1:3] = facet
     return prediction.state_support(stage, direction)
@@ -250,8 +263,9 @@ def _distance_support(
 def _preterminal_support(
     mission: _Mission,
     prediction: _Prediction,
+    generated: object,
 ) -> tuple[np.ndarray, np.ndarray]:
-    del mission, prediction
+    del mission, prediction, generated
     return np.empty((0, 3)), np.empty(0)
 
 
@@ -261,9 +275,8 @@ def _fixture(approaching: bool = True) -> tuple[object, _Predictor, _Mission]:
     lower[0], upper[0] = 0.0, 2.0
     lower[1:3], upper[1:3] = -0.2, 0.2
     lower[6], upper[6] = 0.9, 1.1
-    domain = ApproachDomain(lower, upper)
+    domain = CompilationDomain(lower, upper)
     mission = _Mission(
-        domain,
         Halfspaces.box((-0.35, -0.35), (0.35, 0.35)),
         FreeSpace.box((-100.0,) * 3, (100.0,) * 3).halfspaces,
     )
@@ -345,8 +358,8 @@ def test_compiler_retains_numerically_close_nonredundant_rows(
     )
     bounds = np.array((0.0, 0.0, 5.0e-11))
     monkeypatch.setattr(
-        compiler,
-        "_rows",
+        compiler.constraint_builder,
+        "rows",
         lambda *_: (matrix.copy(), bounds.copy()),
     )
 
@@ -358,8 +371,8 @@ def test_compiler_retains_numerically_close_nonredundant_rows(
     )
 
     assert simplex is not None
-    np.testing.assert_array_equal(simplex.constraint_matrix, matrix)
-    np.testing.assert_array_equal(simplex.constraint_bounds[0], bounds)
+    assert simplex.constraint_count == matrix.shape[0]
+    assert _exactly_feasible(matrix, simplex.backup(), bounds)
     point = np.array((5.0e-11, -5.0e-11, 0.0))
     assert np.any(matrix @ point > bounds)
 
@@ -378,24 +391,35 @@ def test_beta_follows_facet_authority_over_worst_approach_rate(
     )
 
 
-def test_uniform_cell_backups_are_feasible_everywhere(
-    compiled: tuple[object, _Predictor],
-) -> None:
-    """Verify one exact backup and bound vector over every complete cell."""
+def test_uniform_cell_backups_are_feasible_everywhere() -> None:
+    """Verify each cell backup against its complete-cell inequalities."""
 
-    certificate, _ = compiled
-    for simplex in certificate.simplices:
-        reference = simplex.backup()
-        bounds = simplex.constraint_bounds[0]
-        np.testing.assert_array_equal(
-            simplex.backup_references,
-            np.broadcast_to(reference, simplex.backup_references.shape),
-        )
-        np.testing.assert_array_equal(
-            simplex.constraint_bounds,
-            np.broadcast_to(bounds, simplex.constraint_bounds.shape),
-        )
-        assert _exactly_feasible(simplex.constraint_matrix, reference, bounds)
+    generated, predictor, mission = _fixture()
+    with (
+        patch("control.capture.error_support", _error_support),
+        patch("control.capture.distance_support", _distance_support),
+        patch("control.capture.preterminal_support_constraints", _preterminal_support),
+    ):
+        compiler = _compiler(generated, predictor, mission)
+        certificate = compiler.compile()
+        for simplex in certificate.simplices:
+            belief, gain_index = compiler._cell_belief(simplex.vertices)
+            prediction = predictor.predict(
+                belief,
+                compiler.queue_center,
+                gain_index,
+                compiler.queue_radius,
+            )
+            matrix, bounds = compiler.constraint_builder.rows(
+                prediction,
+                certificate.beta,
+                simplex.progress_m,
+                simplex.terminal,
+            )
+            reference = simplex.backup()
+            assert simplex.constraint_count == matrix.shape[0]
+            np.testing.assert_array_equal(simplex.backup_reference, reference)
+            assert np.max(matrix @ reference - bounds) <= 1.0e-15
 
 
 def test_complete_belief_simplex_containment_is_not_center_only(
@@ -430,6 +454,19 @@ def test_complete_belief_simplex_containment_is_not_center_only(
         )
 
 
+def test_subdivision_tree_locates_every_compiled_simplex(
+    compiled: tuple[object, _Predictor],
+) -> None:
+    certificate, _ = compiled
+    for expected, simplex in enumerate(certificate.simplices):
+        normalized = np.mean(simplex.vertices, axis=0)
+        coordinates = (
+            certificate.coordinate_offset + certificate.coordinate_scale * normalized
+        )
+        actual, _ = certificate.locate(coordinates)
+        assert actual == expected
+
+
 def test_complete_queue_zonotope_is_compiled_without_corner_sampling(
     compiled: tuple[object, _Predictor],
 ) -> None:
@@ -440,14 +477,15 @@ def test_complete_queue_zonotope_is_compiled_without_corner_sampling(
     assert set(predictor.queue_radii) == {(1.0, 1.0, 1.0)}
 
 
-def test_fixed_shape_rows_and_positive_nonterminal_progress(
+def test_online_row_counts_and_positive_nonterminal_progress(
     compiled: tuple[object, _Predictor],
 ) -> None:
-    """Store one row shape and generated progress for every running cell."""
+    """Store only row counts and generated progress for running cells."""
 
     certificate, _ = compiled
-    shapes = {simplex.constraint_matrix.shape for simplex in certificate.simplices}
-    assert len(shapes) == 1
+    assert certificate.max_constraints == max(
+        simplex.constraint_count for simplex in certificate.simplices
+    )
     nonterminal = [simplex for simplex in certificate.simplices if not simplex.terminal]
     assert nonterminal
     assert all(simplex.progress_m > 0.0 for simplex in nonterminal)
@@ -462,23 +500,19 @@ def test_degenerate_domains_and_simplices_are_rejected() -> None:
     with pytest.raises(ValueError, match="dependent"):
         CaptureSimplex(
             vertices,
-            np.zeros((4, 3)),
-            np.zeros((1, 3)),
-            np.ones((4, 1)),
+            np.zeros(3),
+            1,
             0,
             0.1,
             False,
         )
 
     vertices = np.vstack((np.zeros(3), np.eye(3)))
-    backups = np.zeros((4, 3))
-    backups[-1, 0] = 0.1
-    with pytest.raises(ValueError, match="backup must be constant"):
+    with pytest.raises(ValueError, match="constraint count"):
         CaptureSimplex(
             vertices,
-            backups,
-            np.zeros((1, 3)),
-            np.ones((4, 1)),
+            np.zeros(3),
+            0,
             0,
             0.1,
             False,
@@ -492,11 +526,10 @@ def test_dependent_distance_error_row_is_skipped_automatically() -> None:
 
     generated, _, mission = _fixture()
     dependent = _DependentMission(
-        mission.approach_domain,
         Halfspaces.box((-2.0, -0.35, -0.35), (0.0, 0.35, 0.35)),
         mission.free_space_halfspaces,
     )
-    coordinates = capture._coordinate_map(generated, dependent)
+    coordinates = capture._coordinate_map(generated, dependent, generated.domain)
     assert coordinates.error_indices == (1, 2)
     assert np.linalg.matrix_rank(coordinates.transform[:, :15]) == 3
 

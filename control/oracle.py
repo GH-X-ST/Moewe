@@ -76,7 +76,6 @@ def generate_aircraft(
             reference_center,
             reference_scale,
             (cell,),
-            (),
         )
         return _verify_gain_cell(generated, cell)
 
@@ -1081,13 +1080,7 @@ class NonlinearOracle:
         width = mission.width_axis_w
         height = np.cross(normal, width)
         center = mission.center_w_m
-        radius = float(np.max(np.linalg.norm(mission.geometry.body_b_m, axis=1)))
-        clearance = (
-            mission.frame_clearance_m
-            + mission.body_inflation_m
-            + mission.position_error_m
-            + radius * mission.attitude_error_rad
-        )
+        clearance = mission._clearance(self.generated)
         initial = prediction.geometry(0).occupied
         final = prediction.geometry(PREDICTION_STAGES).occupied
         if _point_support(initial, normal) - normal @ center > -clearance:
@@ -1150,13 +1143,7 @@ class NonlinearOracle:
         width = mission.width_axis_w
         normal = np.cross(length, width)
         center = mission.center_w_m
-        radius = float(np.max(np.linalg.norm(mission.geometry.body_b_m, axis=1)))
-        clearance = (
-            mission.platform_clearance_m
-            + mission.body_inflation_m
-            + mission.position_error_m
-            + radius * mission.attitude_error_rad
-        )
+        clearance = mission._clearance(self.generated)
         initial_body = _plane_height(
             prediction.geometry(0).occupied,
             center,
@@ -1219,8 +1206,8 @@ class NonlinearOracle:
     ) -> bool:
         length = mission.length_axis_w
         width = mission.width_axis_w
-        body = mission.geometry.body_b_m
-        contact = mission.geometry.contact_b_m
+        body = self.generated.geometry.body_b_m
+        contact = self.generated.geometry.contact_b_m
         permitted = np.any(
             np.all(body[:, None] == contact[None, :], axis=2),
             axis=1,

@@ -11,12 +11,13 @@ import numpy as np
 import pytest
 
 from control.capture import (
+    _LookupNode,
     CaptureCertificate,
     CaptureSimplex,
 )
 from control.flow import FlowBounds
 from control.governor import JointFlowCaptureGovernor, _SOLVED, _TIMED_OUT
-from control.missions import ApproachDomain
+from control.missions import CompilationDomain, Halfspaces
 from control.predictor import (
     _AircraftModel,
     GeneratedAircraft,
@@ -28,16 +29,51 @@ from models.geometry import RigidBodyGeometry
 
 
 class _Mission:
-    def __init__(self, domain: ApproachDomain) -> None:
-        self.approach_domain = domain
+    def __init__(self) -> None:
         self.terminal_x: float | None = None
         self.last_segment: np.ndarray | None = None
+        self.matrix = np.zeros((1, 3))
+        self.bounds = np.ones(1)
+        self.queue_dependent = False
 
-    def realized(self, states: np.ndarray) -> bool:
+    def terminal_halfspaces(self, generated: GeneratedAircraft) -> Halfspaces:
+        del generated
+        return Halfspaces.box((-100.0, -100.0), (100.0, 100.0))
+
+    @property
+    def free_space_halfspaces(self) -> Halfspaces:
+        return Halfspaces.box((-100.0,) * 3, (100.0,) * 3)
+
+    def error(self, state: np.ndarray, generated: GeneratedAircraft) -> np.ndarray:
+        del generated
+        return np.asarray(state, dtype=float)[1:3]
+
+    def distance(self, state: np.ndarray) -> float:
+        return float(np.asarray(state, dtype=float)[0])
+
+    def realized(self, states: np.ndarray, generated: GeneratedAircraft) -> bool:
+        del generated
         self.last_segment = np.asarray(states, dtype=float).copy()
         return self.terminal_x is not None and bool(
             states[0, 0] <= self.terminal_x <= states[-1, 0]
         )
+
+    def terminal_support_constraints(
+        self,
+        prediction: object,
+        generated: GeneratedAircraft,
+        domain: CompilationDomain,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        del prediction, generated, domain
+        return np.empty((0, 3)), np.empty(0)
+
+    def online_rows(
+        self, prediction: object, *_: object
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if self.queue_dependent:
+            center = prediction.applied_center
+            return np.array(((1.0, 0.0, 0.0),)), np.array((0.03 + center[0, 0],))
+        return self.matrix.copy(), self.bounds.copy()
 
 
 @pytest.fixture(scope="module")
@@ -107,13 +143,12 @@ def generated() -> GeneratedAircraft:
         model.reference_center,
         model.reference_scale,
         model.cells,
-        model.rejected_cells,
     )
 
 
 def _mission(generated: GeneratedAircraft) -> _Mission:
-    anchor = generated.cells[0].anchor
-    return _Mission(ApproachDomain(anchor - 100.0, anchor + 100.0))
+    del generated
+    return _Mission()
 
 
 def _certificate(
@@ -140,11 +175,13 @@ def _certificate(
             (-1.0, -1.0, -1.0),
         )
     )
+    selected_mission = _mission(generated) if mission is None else mission
+    selected_mission.matrix = rows.copy()
+    selected_mission.bounds = limits.copy()
     simplex = CaptureSimplex(
         vertices,
-        np.tile(backup_reference, (4, 1)),
-        rows,
-        np.tile(limits, (4, 1)),
+        backup_reference,
+        rows.shape[0],
         0,
         1.0,
         terminal,
@@ -153,6 +190,7 @@ def _certificate(
     augmented_offset = np.concatenate((generated.cells[0].anchor, np.zeros(queue_size)))
     transform = np.zeros((3, augmented_offset.size))
     transform[:, :3] = np.eye(3)
+    anchor = generated.cells[0].anchor
     return CaptureCertificate(
         beta=np.ones(2),
         coordinate_offset=np.zeros(3),
@@ -165,8 +203,10 @@ def _certificate(
         augmented_offset=augmented_offset,
         augmented_scale=np.ones(augmented_offset.size),
         coordinate_transform=transform,
-        mission=_mission(generated) if mission is None else mission,
+        domain=CompilationDomain(anchor - 100.0, anchor + 100.0),
+        mission=selected_mission,
         generated=generated,
+        lookup_roots=(_LookupNode(vertices, 0),),
     )
 
 
@@ -185,6 +225,7 @@ def _activate(
         np.zeros(3) if reference is None else reference,
         np.zeros((generated.bounds.queue_length, 3)) if queue is None else queue,
     )
+    controller._constraint_builder.rows = mission.online_rows
     return controller
 
 
@@ -208,7 +249,6 @@ def test_runtime_rejects_unverified_aircraft_model(
         generated.reference_center,
         generated.reference_scale,
         generated.cells,
-        generated.rejected_cells,
     )
     with pytest.raises(TypeError, match="oracle-verified"):
         JointFlowCaptureGovernor(model)
@@ -226,7 +266,6 @@ def test_capture_certificate_is_bound_to_its_aircraft_core(
         generated.reference_center,
         generated.reference_scale,
         generated.cells,
-        generated.rejected_cells,
     )
     controller = JointFlowCaptureGovernor(other)
     certificate = _certificate(generated)
@@ -366,13 +405,14 @@ def test_complete_state_domain_is_checked_before_projected_membership(
     generated: GeneratedAircraft,
 ) -> None:
     mission = _mission(generated)
+    certificate = _certificate(generated, mission=mission)
     controller = _activate(
         generated,
         mission,
-        _certificate(generated, mission=mission),
+        certificate,
     )
     state = generated.cells[0].anchor.copy()
-    state[3] = mission.approach_domain.upper[3]
+    state[3] = certificate.domain.upper[3]
     assert controller.command(state, np.zeros(3), perf_counter() + 30.0) is None
     assert controller.status == "out_of_envelope"
 
@@ -497,7 +537,7 @@ def test_expired_update_deadline_stops_before_prediction(
     assert controller.status == "out_of_envelope"
 
 
-def test_solver_failure_is_out_of_envelope(
+def test_infeasible_online_set_uses_the_compiled_backup(
     generated: GeneratedAircraft,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -514,20 +554,34 @@ def test_solver_failure_is_out_of_envelope(
         np.full(3, 0.1),
         perf_counter() + 1.0,
     )
-    assert command is None
-    assert controller.status == "out_of_envelope"
+    assert command is not None
+    np.testing.assert_array_equal(controller.current_reference, backup)
+    assert controller.status == "active"
 
 
-def test_infeasible_governor_polytope_is_not_compiled(
+def test_empty_current_governor_polytope_uses_the_compiled_backup(
     generated: GeneratedAircraft,
 ) -> None:
-    with pytest.raises(ValueError, match="empty or lower-dimensional"):
+    mission = _mission(generated)
+    controller = _activate(
+        generated,
+        mission,
         _certificate(
             generated,
             matrix=np.zeros((1, 3)),
             bounds=np.array((-1.0,)),
             backup=np.full(3, 0.02),
-        )
+            mission=mission,
+        ),
+    )
+    command = controller.command(
+        generated.cells[0].anchor,
+        np.zeros(3),
+        perf_counter() + 30.0,
+    )
+    assert command is not None
+    np.testing.assert_array_equal(controller.current_reference, np.full(3, 0.02))
+    assert controller.status == "active"
 
 
 def test_raw_command_and_initial_fifo_require_command_error_margin(
@@ -555,7 +609,7 @@ def test_raw_command_and_initial_fifo_require_command_error_margin(
     np.testing.assert_array_equal(raw.issued_queue, queue)
 
 
-def test_compiled_rows_constrain_the_reference(
+def test_current_prediction_rows_constrain_the_reference(
     generated: GeneratedAircraft,
 ) -> None:
     mission = _mission(generated)
@@ -578,7 +632,32 @@ def test_compiled_rows_constrain_the_reference(
     assert controller.current_reference[0] <= 0.01 + 1.0e-12
 
 
-def test_terminal_event_uses_only_a_validated_measured_segment(
+def test_measured_queue_changes_the_current_admissible_set(
+    generated: GeneratedAircraft,
+) -> None:
+    references = []
+    for value in (-0.02, 0.02):
+        mission = _mission(generated)
+        mission.queue_dependent = True
+        queue = np.full((generated.bounds.queue_length, 3), value)
+        controller = _activate(
+            generated,
+            mission,
+            _certificate(generated, mission=mission),
+            queue,
+        )
+        command = controller.command(
+            generated.cells[0].anchor,
+            np.array((0.1, 0.0, 0.0)),
+            perf_counter() + 30.0,
+        )
+        assert command is not None
+        references.append(controller.current_reference[0])
+
+    assert references[1] > references[0] + 0.02
+
+
+def test_terminal_event_is_checked_on_each_measured_segment(
     generated: GeneratedAircraft,
 ) -> None:
     mission = _mission(generated)
@@ -591,21 +670,18 @@ def test_terminal_event_uses_only_a_validated_measured_segment(
     initial = generated.cells[0].anchor
     assert controller.command(initial, np.zeros(3), deadline) is not None
     mission.terminal_x = 0.5 * (initial[0] + _nominal_state(controller, 1)[0])
-    for stage in range(1, PREDICTION_STAGES):
-        assert (
-            controller.command(
-                _nominal_state(controller, stage),
-                np.zeros(3),
-                deadline,
-            )
-            is not None
-        )
     queue = controller.issued_queue.copy()
-    final = _nominal_state(controller, PREDICTION_STAGES)
-    assert controller.command(final, np.zeros(3), deadline) is None
+    assert (
+        controller.command(
+            _nominal_state(controller, 1),
+            np.zeros(3),
+            deadline,
+        )
+        is None
+    )
     assert controller.status == "terminal"
     assert mission.last_segment is not None
-    assert mission.last_segment.shape == (PREDICTION_STAGES + 1, 15)
+    assert mission.last_segment.shape == (2, 15)
     np.testing.assert_array_equal(controller.issued_queue, queue)
 
 
@@ -628,12 +704,13 @@ def test_terminal_reference_is_held_for_the_complete_event_horizon(
         assert controller.command(state, np.full(3, -0.02), deadline) is not None
         np.testing.assert_array_equal(controller.current_reference, reference)
 
+    previous_state = _nominal_state(controller, PREDICTION_STAGES - 1)
     terminal_state = _nominal_state(controller, PREDICTION_STAGES)
-    mission.terminal_x = 0.5 * (initial[0] + terminal_state[0])
+    mission.terminal_x = 0.5 * (previous_state[0] + terminal_state[0])
     assert controller.command(terminal_state, np.zeros(3), deadline) is None
     assert controller.status == "terminal"
     assert mission.last_segment is not None
-    assert mission.last_segment.shape[0] == PREDICTION_STAGES + 1
+    assert mission.last_segment.shape == (2, 15)
 
 
 def test_nonterminal_simplex_does_not_run_the_event_monitor(

@@ -11,7 +11,6 @@ import numpy as np
 import numpy.typing as npt
 
 from models.geometry import (
-    RigidBodyGeometry,
     body_to_world,
     gate_crossing,
     orthogonal_axes,
@@ -21,12 +20,12 @@ from models.geometry import (
 from models.state import as_state
 
 if TYPE_CHECKING:
-    from control.predictor import Prediction
+    from control.predictor import GeneratedAircraft, Prediction
 
 
 @dataclass(frozen=True)
-class ApproachDomain:
-    """Complete bounded state fiber on which a mission is compiled."""
+class CompilationDomain:
+    """Bounded aircraft-state domain used for offline compilation."""
 
     lower: npt.ArrayLike
     upper: npt.ArrayLike
@@ -42,12 +41,6 @@ class ApproachDomain:
         object.__setattr__(self, "upper", upper)
         object.__setattr__(self, "center", center)
         object.__setattr__(self, "radius", radius)
-
-    def contains(self, state: npt.ArrayLike) -> bool:
-        """Return whether a state belongs to the complete approach box."""
-
-        value = as_state(state)
-        return bool(np.all(value >= self.lower) and np.all(value <= self.upper))
 
 
 @dataclass(frozen=True)
@@ -102,15 +95,13 @@ class FreeSpace:
 
 
 class Mission(Protocol):
-    """Manuscript terminal-mission contract."""
+    """Terminal mission interface."""
 
-    @property
-    def approach_domain(self) -> ApproachDomain:
-        """Return the compiled terminal-approach domain."""
-
-        ...
-
-    def error(self, state: npt.ArrayLike) -> np.ndarray:
+    def error(
+        self,
+        state: npt.ArrayLike,
+        generated: GeneratedAircraft,
+    ) -> np.ndarray:
         """Return terminal-error coordinates."""
 
         ...
@@ -120,8 +111,7 @@ class Mission(Protocol):
 
         ...
 
-    @property
-    def terminal_halfspaces(self) -> Halfspaces:
+    def terminal_halfspaces(self, generated: GeneratedAircraft) -> Halfspaces:
         """Return the exact terminal error set."""
 
         ...
@@ -132,7 +122,11 @@ class Mission(Protocol):
 
         ...
 
-    def realized(self, states: npt.ArrayLike) -> bool:
+    def realized(
+        self,
+        states: npt.ArrayLike,
+        generated: GeneratedAircraft,
+    ) -> bool:
         """Return whether measured states realize the terminal event."""
 
         ...
@@ -140,6 +134,8 @@ class Mission(Protocol):
     def terminal_support_constraints(
         self,
         prediction: Prediction,
+        generated: GeneratedAircraft,
+        domain: CompilationDomain,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return affine reference rows for the robust terminal event."""
 
@@ -150,38 +146,29 @@ class Mission(Protocol):
 class GateMission:
     """Full-body passage through a rectangular aperture."""
 
-    approach_domain: ApproachDomain
     free_space: FreeSpace
-    geometry: RigidBodyGeometry
     center_w_m: npt.ArrayLike
     normal_w: npt.ArrayLike
     width_axis_w: npt.ArrayLike
     width_m: float
     height_m: float
-    center_flow_b_m_s: npt.ArrayLike
     target_airspeed_m_s: float
     heading_abs_max_rad: float
     roll_abs_max_rad: float
     pitch_bounds_rad: tuple[float, float]
     airspeed_bounds_m_s: tuple[float, float]
     frame_clearance_m: float
-    body_inflation_m: float
-    position_error_m: float
-    attitude_error_rad: float
-    _terminal_halfspaces: Halfspaces = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         normal, width, _ = orthogonal_axes(self.normal_w, self.width_axis_w)
         object.__setattr__(self, "center_w_m", _immutable(self.center_w_m, (3,)))
         object.__setattr__(self, "normal_w", _immutable(normal, (3,)))
         object.__setattr__(self, "width_axis_w", _immutable(width, (3,)))
-        object.__setattr__(
-            self,
-            "center_flow_b_m_s",
-            _immutable(self.center_flow_b_m_s, (3,)),
-        )
 
-        clearance = self._clearance
+    def terminal_halfspaces(self, generated: GeneratedAircraft) -> Halfspaces:
+        """Return aperture, heading, attitude, and airspeed limits."""
+
+        clearance = self._clearance(generated)
         lower = np.array(
             [
                 -0.5 * self.width_m + clearance,
@@ -202,13 +189,7 @@ class GateMission:
                 self.airspeed_bounds_m_s[1] - self.target_airspeed_m_s,
             ]
         )
-        object.__setattr__(self, "_terminal_halfspaces", Halfspaces.box(lower, upper))
-
-    @property
-    def terminal_halfspaces(self) -> Halfspaces:
-        """Return aperture, heading, attitude, and airspeed limits."""
-
-        return self._terminal_halfspaces
+        return Halfspaces.box(lower, upper)
 
     @property
     def free_space_halfspaces(self) -> Halfspaces:
@@ -216,14 +197,20 @@ class GateMission:
 
         return self.free_space.halfspaces
 
-    def error(self, state: npt.ArrayLike) -> np.ndarray:
+    def error(
+        self,
+        state: npt.ArrayLike,
+        generated: GeneratedAircraft,
+    ) -> np.ndarray:
         """Return aperture, heading, roll, pitch, and airspeed error."""
 
         value = as_state(state)
         height_axis = np.cross(self.normal_w, self.width_axis_w)
         offset = value[:3] - self.center_w_m
         heading = _wrap(_gate_yaw(self) - value[5])
-        airspeed = float(np.linalg.norm(value[6:9] - self.center_flow_b_m_s))
+        flow = generated.bounds.flow
+        center_flow = 0.5 * (flow.center_lower_m_s + flow.center_upper_m_s)
+        airspeed = float(np.linalg.norm(value[6:9] - center_flow))
         return np.array(
             [
                 offset @ self.width_axis_w,
@@ -241,31 +228,38 @@ class GateMission:
         position = as_state(state)[:3]
         return float(-self.normal_w @ (position - self.center_w_m))
 
-    def realized(self, states: npt.ArrayLike) -> bool:
+    def realized(
+        self,
+        states: npt.ArrayLike,
+        generated: GeneratedAircraft,
+    ) -> bool:
         """Evaluate full-body gate passage from measured states."""
 
         return gate_crossing(
             states,
-            self.geometry,
+            generated.geometry,
             self.center_w_m,
             self.normal_w,
             self.width_axis_w,
             self.width_m,
             self.height_m,
             self.frame_clearance_m,
-            self.body_inflation_m,
-            self.position_error_m,
-            self.attitude_error_rad,
+            generated.bounds.body_inflation_m,
+            generated.bounds.mission_position_error_abs_m,
+            generated.bounds.mission_attitude_error_abs_rad,
         )
 
     def terminal_support_constraints(
         self,
         prediction: Prediction,
+        generated: GeneratedAircraft,
+        domain: CompilationDomain,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return conservative affine rows for robust gate crossing."""
 
         stages = prediction.body_center.shape[0]
-        body_count = self.geometry.body_b_m.shape[0]
+        geometry = generated.geometry
+        body_count = geometry.body_b_m.shape[0]
         height = np.cross(self.normal_w, self.width_axis_w)
         axes = (
             self.width_axis_w,
@@ -274,39 +268,39 @@ class GateMission:
             -height,
         )
         limits = (
-            0.5 * self.width_m - self._support_clearance,
-            0.5 * self.width_m - self._support_clearance,
-            0.5 * self.height_m - self._support_clearance,
-            0.5 * self.height_m - self._support_clearance,
+            0.5 * self.width_m - self._support_clearance(generated),
+            0.5 * self.width_m - self._support_clearance(generated),
+            0.5 * self.height_m - self._support_clearance(generated),
+            0.5 * self.height_m - self._support_clearance(generated),
         )
-        terminal = self.terminal_halfspaces
+        terminal = self.terminal_halfspaces(generated)
         event_rows = np.flatnonzero(np.all(terminal.matrix[:, :2] == 0.0, axis=1))
         row_count = body_count * (2 + 4 * stages) + (stages + 1) * event_rows.size
         matrix = np.empty((row_count, 3))
         bounds = np.empty(row_count)
         row = 0
-        for point in self.geometry.body_b_m:
+        for point in geometry.body_b_m:
             row = _body_state_row(
                 prediction,
-                self.approach_domain,
+                domain,
                 point.reshape(1, 3),
                 0,
                 self.normal_w,
                 self.center_w_m,
-                -self._clearance,
+                -self._clearance(generated),
                 matrix,
                 bounds,
                 row,
             )
-        for point in self.geometry.body_b_m:
+        for point in geometry.body_b_m:
             row = _body_state_row(
                 prediction,
-                self.approach_domain,
+                domain,
                 point.reshape(1, 3),
                 stages,
                 -self.normal_w,
                 self.center_w_m,
-                -self._clearance,
+                -self._clearance(generated),
                 matrix,
                 bounds,
                 row,
@@ -332,35 +326,36 @@ class GateMission:
                     prediction,
                     stage,
                     terminal.matrix[terminal_row],
+                    generated,
+                    domain,
                 )
                 matrix[row] = reference
                 bounds[row] = terminal.bounds[terminal_row] - offset
                 row += 1
         return matrix, bounds
 
-    @property
-    def _clearance(self) -> float:
-        radius = float(np.max(np.linalg.norm(self.geometry.body_b_m, axis=1)))
+    def _clearance(self, generated: GeneratedAircraft) -> float:
+        radius = float(np.max(np.linalg.norm(generated.geometry.body_b_m, axis=1)))
         return (
             self.frame_clearance_m
-            + self.body_inflation_m
-            + self.position_error_m
-            + radius * self.attitude_error_rad
+            + generated.bounds.body_inflation_m
+            + generated.bounds.mission_position_error_abs_m
+            + radius * generated.bounds.mission_attitude_error_abs_rad
         )
 
-    @property
-    def _support_clearance(self) -> float:
-        radius = float(np.max(np.linalg.norm(self.geometry.body_b_m, axis=1)))
-        return self.frame_clearance_m + radius * self.attitude_error_rad
+    def _support_clearance(self, generated: GeneratedAircraft) -> float:
+        radius = float(np.max(np.linalg.norm(generated.geometry.body_b_m, axis=1)))
+        return (
+            self.frame_clearance_m
+            + radius * generated.bounds.mission_attitude_error_abs_rad
+        )
 
 
 @dataclass(frozen=True)
 class LandingMission:
     """First-contact landing on a finite planar platform."""
 
-    approach_domain: ApproachDomain
     free_space: FreeSpace
-    geometry: RigidBodyGeometry
     center_w_m: npt.ArrayLike
     length_axis_w: npt.ArrayLike
     width_axis_w: npt.ArrayLike
@@ -373,10 +368,6 @@ class LandingMission:
     normal_speed_max_m_s: float
     tangential_speed_max_m_s: float
     platform_clearance_m: float
-    body_inflation_m: float
-    position_error_m: float
-    attitude_error_rad: float
-    _terminal_halfspaces: Halfspaces = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         length, width, _ = orthogonal_axes(
@@ -387,15 +378,19 @@ class LandingMission:
         object.__setattr__(self, "length_axis_w", _immutable(length, (3,)))
         object.__setattr__(self, "width_axis_w", _immutable(width, (3,)))
 
-        clearance = self._clearance
+    def terminal_halfspaces(self, generated: GeneratedAircraft) -> Halfspaces:
+        """Return platform, attitude, and contact-velocity limits."""
+
+        geometry = generated.geometry
+        clearance = self._clearance(generated)
         tangent_limit = self.tangential_speed_max_m_s / sqrt(2.0)
         velocity_lower = np.tile(
             (0.0, -tangent_limit, -tangent_limit),
-            self.geometry.contact_b_m.shape[0],
+            geometry.contact_b_m.shape[0],
         )
         velocity_upper = np.tile(
             (self.normal_speed_max_m_s, tangent_limit, tangent_limit),
-            self.geometry.contact_b_m.shape[0],
+            geometry.contact_b_m.shape[0],
         )
         lower = np.concatenate(
             (
@@ -421,13 +416,7 @@ class LandingMission:
                 velocity_upper,
             )
         )
-        object.__setattr__(self, "_terminal_halfspaces", Halfspaces.box(lower, upper))
-
-    @property
-    def terminal_halfspaces(self) -> Halfspaces:
-        """Return platform, attitude, and contact-velocity limits."""
-
-        return self._terminal_halfspaces
+        return Halfspaces.box(lower, upper)
 
     @property
     def free_space_halfspaces(self) -> Halfspaces:
@@ -435,13 +424,17 @@ class LandingMission:
 
         return self.free_space.halfspaces
 
-    def error(self, state: npt.ArrayLike) -> np.ndarray:
+    def error(
+        self,
+        state: npt.ArrayLike,
+        generated: GeneratedAircraft,
+    ) -> np.ndarray:
         """Return platform, attitude, and every contact-point velocity."""
 
         value = as_state(state)
         normal = np.cross(self.length_axis_w, self.width_axis_w)
         offset = value[:3] - self.center_w_m
-        velocity = point_velocities(value, self.geometry.contact_b_m)
+        velocity = point_velocities(value, generated.geometry.contact_b_m)
         contact_velocity = np.column_stack(
             (
                 -velocity @ normal,
@@ -468,12 +461,16 @@ class LandingMission:
         position = as_state(state)[:3]
         return float(-self.length_axis_w @ (position - self.center_w_m))
 
-    def realized(self, states: npt.ArrayLike) -> bool:
+    def realized(
+        self,
+        states: npt.ArrayLike,
+        generated: GeneratedAircraft,
+    ) -> bool:
         """Evaluate admissible first contact from measured states."""
 
         return platform_landing(
             states,
-            self.geometry,
+            generated.geometry,
             self.center_w_m,
             self.length_axis_w,
             self.width_axis_w,
@@ -485,28 +482,31 @@ class LandingMission:
             self.pitch_error_abs_max_rad,
             self.touchdown_pitch_rad,
             self.platform_clearance_m,
-            self.body_inflation_m,
-            self.position_error_m,
-            self.attitude_error_rad,
+            generated.bounds.body_inflation_m,
+            generated.bounds.mission_position_error_abs_m,
+            generated.bounds.mission_attitude_error_abs_rad,
         )
 
     def terminal_support_constraints(
         self,
         prediction: Prediction,
+        generated: GeneratedAircraft,
+        domain: CompilationDomain,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return conservative affine rows for robust first contact."""
 
         stages = prediction.body_center.shape[0]
         last = stages - 1
         normal = np.cross(self.length_axis_w, self.width_axis_w)
+        geometry = generated.geometry
         forbidden = _noncontact_indices(
-            self.geometry.body_b_m,
-            self.geometry.contact_b_m,
+            geometry.body_b_m,
+            geometry.contact_b_m,
         )
-        body_count = self.geometry.body_b_m.shape[0]
-        contact_count = self.geometry.contact_b_m.shape[0]
-        footprint_count = self.geometry.footprint_b_m.shape[0]
-        terminal = self.terminal_halfspaces
+        body_count = geometry.body_b_m.shape[0]
+        contact_count = geometry.contact_b_m.shape[0]
+        footprint_count = geometry.footprint_b_m.shape[0]
+        terminal = self.terminal_halfspaces(generated)
         state_rows = np.flatnonzero(np.any(terminal.matrix[:, :5] != 0.0, axis=1))
         row_count = (
             last * body_count
@@ -528,20 +528,20 @@ class LandingMission:
                     point,
                     -normal,
                     self.center_w_m,
-                    -self._support_clearance,
+                    -self._support_clearance(generated),
                     matrix,
                     bounds,
                     row,
                 )
-        for point in self.geometry.contact_b_m:
+        for point in geometry.contact_b_m:
             row = _body_state_row(
                 prediction,
-                self.approach_domain,
+                domain,
                 point.reshape(1, 3),
                 stages,
                 normal,
                 self.center_w_m,
-                self._clearance,
+                self._clearance(generated),
                 matrix,
                 bounds,
                 row,
@@ -553,7 +553,7 @@ class LandingMission:
                 int(point),
                 -normal,
                 self.center_w_m,
-                -self._support_clearance,
+                -self._support_clearance(generated),
                 matrix,
                 bounds,
                 row,
@@ -566,10 +566,10 @@ class LandingMission:
             -self.width_axis_w,
         )
         footprint_limits = (
-            0.5 * self.length_m - self._support_clearance,
-            0.5 * self.length_m - self._support_clearance,
-            0.5 * self.width_m - self._support_clearance,
-            0.5 * self.width_m - self._support_clearance,
+            0.5 * self.length_m - self._support_clearance(generated),
+            0.5 * self.length_m - self._support_clearance(generated),
+            0.5 * self.width_m - self._support_clearance(generated),
+            0.5 * self.width_m - self._support_clearance(generated),
         )
         for axis, limit in zip(footprint_axes, footprint_limits, strict=True):
             for point in range(footprint_count):
@@ -614,26 +614,29 @@ class LandingMission:
                     prediction,
                     stage,
                     terminal.matrix[terminal_row],
+                    generated,
+                    domain,
                 )
                 matrix[row] = reference
                 bounds[row] = terminal.bounds[terminal_row] - offset
                 row += 1
         return matrix, bounds
 
-    @property
-    def _clearance(self) -> float:
-        radius = float(np.max(np.linalg.norm(self.geometry.body_b_m, axis=1)))
+    def _clearance(self, generated: GeneratedAircraft) -> float:
+        radius = float(np.max(np.linalg.norm(generated.geometry.body_b_m, axis=1)))
         return (
             self.platform_clearance_m
-            + self.body_inflation_m
-            + self.position_error_m
-            + radius * self.attitude_error_rad
+            + generated.bounds.body_inflation_m
+            + generated.bounds.mission_position_error_abs_m
+            + radius * generated.bounds.mission_attitude_error_abs_rad
         )
 
-    @property
-    def _support_clearance(self) -> float:
-        radius = float(np.max(np.linalg.norm(self.geometry.body_b_m, axis=1)))
-        return self.platform_clearance_m + radius * self.attitude_error_rad
+    def _support_clearance(self, generated: GeneratedAircraft) -> float:
+        radius = float(np.max(np.linalg.norm(generated.geometry.body_b_m, axis=1)))
+        return (
+            self.platform_clearance_m
+            + radius * generated.bounds.mission_attitude_error_abs_rad
+        )
 
 
 def error_support(
@@ -641,6 +644,8 @@ def error_support(
     prediction: Prediction,
     stage: int,
     facet: npt.ArrayLike,
+    generated: GeneratedAircraft,
+    domain: CompilationDomain,
 ) -> tuple[float, np.ndarray]:
     """Return an affine upper support bound for one terminal-error facet."""
 
@@ -657,7 +662,7 @@ def error_support(
         offset -= float(position_axis @ mission.center_w_m)
         offset += row[2] * _gate_yaw(mission)
         offset -= row[5] * mission.target_airspeed_m_s
-        offset += abs(row[2]) * _heading_residual(mission)
+        offset += abs(row[2]) * _heading_residual(mission, domain)
         speed_offset, speed_reference = prediction.airspeed_support(
             stage,
             row[5],
@@ -667,7 +672,7 @@ def error_support(
         return offset, reference
 
     landing = cast(LandingMission, mission)
-    contact_count = landing.geometry.contact_b_m.shape[0]
+    contact_count = generated.geometry.contact_b_m.shape[0]
     row = np.asarray(facet, dtype=float).reshape(5 + 3 * contact_count)
     normal = np.cross(landing.length_axis_w, landing.width_axis_w)
     position_axis = (
@@ -700,18 +705,19 @@ def error_support(
 def preterminal_support_constraints(
     mission: Mission,
     prediction: Prediction,
+    generated: GeneratedAircraft,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Keep the swept body strictly before the mission contact surface."""
 
     if isinstance(mission, GateMission):
         axis = mission.normal_w
         center = mission.center_w_m
-        clearance = mission._support_clearance
+        clearance = mission._support_clearance(generated)
     else:
         landing = cast(LandingMission, mission)
         axis = -np.cross(landing.length_axis_w, landing.width_axis_w)
         center = landing.center_w_m
-        clearance = landing._support_clearance
+        clearance = landing._support_clearance(generated)
     stages = prediction.body_center.shape[0]
     body_count = prediction.body_count
     matrix = np.empty((stages * body_count, 3))
@@ -757,7 +763,7 @@ def distance_support(
 
 def _body_state_row(
     prediction: Prediction,
-    domain: ApproachDomain,
+    domain: CompilationDomain,
     points_b_m: np.ndarray,
     stage: int,
     axis_w: np.ndarray,
@@ -794,7 +800,7 @@ def _point_row(
 
 
 def _orientation_support(
-    domain: ApproachDomain,
+    domain: CompilationDomain,
     points_b_m: np.ndarray,
     axis_w: np.ndarray,
 ) -> float:
@@ -821,10 +827,13 @@ def _wrap(angle: float) -> float:
     return float(np.arctan2(np.sin(angle), np.cos(angle)))
 
 
-def _heading_residual(mission: GateMission) -> float:
+def _heading_residual(
+    mission: GateMission,
+    domain: CompilationDomain,
+) -> float:
     desired = _gate_yaw(mission)
-    lower = desired - mission.approach_domain.upper[5]
-    upper = desired - mission.approach_domain.lower[5]
+    lower = desired - domain.upper[5]
+    upper = desired - domain.lower[5]
     return 0.0 if lower >= -pi and upper <= pi else 2.0 * pi
 
 

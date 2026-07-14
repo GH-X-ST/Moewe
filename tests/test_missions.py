@@ -1,15 +1,15 @@
-"""Tests for manuscript gate and landing mission geometry."""
+"""Tests for gate and landing mission geometry."""
 
 from __future__ import annotations
 
-from dataclasses import replace
 from math import cos, radians, sin, sqrt
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from control.missions import (
-    ApproachDomain,
+    CompilationDomain,
     FreeSpace,
     GateMission,
     Halfspaces,
@@ -18,6 +18,7 @@ from control.missions import (
     error_support,
     preterminal_support_constraints,
 )
+from control.flow import FlowBounds
 from control.predictor import Prediction
 from models.geometry import (
     RigidBodyGeometry,
@@ -76,7 +77,23 @@ def _axes(angle_rad: float) -> tuple[np.ndarray, np.ndarray]:
     return forward, lateral
 
 
-def _domain(center: np.ndarray, attitude_radius: float = 0.02) -> ApproachDomain:
+def _domain(
+    mission: GateMission | LandingMission,
+    attitude_radius: float | None = None,
+) -> CompilationDomain:
+    if attitude_radius is None:
+        attitude_radius = 0.02 if isinstance(mission, GateMission) else 0.01
+    if isinstance(mission, GateMission):
+        yaw = -float(np.arctan2(mission.normal_w[1], mission.normal_w[0]))
+        center = _state(mission.center_w_m - 0.4 * mission.normal_w, yaw)
+    else:
+        normal = np.cross(mission.length_axis_w, mission.width_axis_w)
+        yaw = -float(np.arctan2(mission.length_axis_w[1], mission.length_axis_w[0]))
+        center = _state(
+            mission.center_w_m + 0.08 * normal,
+            yaw,
+            velocity_b_m_s=(0.0, 0.0, 0.4),
+        )
     radius = np.array(
         [
             2.0,
@@ -96,7 +113,30 @@ def _domain(center: np.ndarray, attitude_radius: float = 0.02) -> ApproachDomain
             0.5,
         ]
     )
-    return ApproachDomain(center - radius, center + radius)
+    return CompilationDomain(center - radius, center + radius)
+
+
+def _generated(
+    geometry: RigidBodyGeometry = MOEWE_GEOMETRY,
+    center_flow_b_m_s: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> SimpleNamespace:
+    flow = np.asarray(center_flow_b_m_s, dtype=float)
+    bounds = SimpleNamespace(
+        flow=FlowBounds(
+            flow,
+            flow,
+            np.zeros((3, 3)),
+            np.zeros((3, 3)),
+            np.zeros(3),
+        ),
+        body_inflation_m=0.005,
+        mission_position_error_abs_m=0.005,
+        mission_attitude_error_abs_rad=0.005,
+    )
+    return SimpleNamespace(geometry=geometry, bounds=bounds)
+
+
+GENERATED = _generated()
 
 
 def _gate_mission(
@@ -107,26 +147,19 @@ def _gate_mission(
 ) -> GateMission:
     normal, width = _axes(angle_rad)
     center_array = np.asarray(center, dtype=float)
-    anchor = _state(center_array - 0.4 * normal, -angle_rad)
     return GateMission(
-        approach_domain=_domain(anchor),
         free_space=FreeSpace.box(center_array - 5.0, center_array + 5.0),
-        geometry=MOEWE_GEOMETRY,
         center_w_m=center_array,
         normal_w=normal,
         width_axis_w=width,
         width_m=width_m,
         height_m=height_m,
-        center_flow_b_m_s=np.zeros(3),
         target_airspeed_m_s=8.0,
         heading_abs_max_rad=radians(10.0),
         roll_abs_max_rad=radians(15.0),
         pitch_bounds_rad=(radians(-10.0), radians(15.0)),
         airspeed_bounds_m_s=(7.0, 9.0),
         frame_clearance_m=0.005,
-        body_inflation_m=0.005,
-        position_error_m=0.005,
-        attitude_error_rad=0.005,
     )
 
 
@@ -146,20 +179,11 @@ def _landing_mission(
     angle_rad: float = 0.0,
     length_m: float = 1.2,
     width_m: float = 1.0,
-    geometry: RigidBodyGeometry = MOEWE_GEOMETRY,
 ) -> LandingMission:
     length, width = _axes(angle_rad)
     center_array = np.asarray(center, dtype=float)
-    normal = np.cross(length, width)
-    anchor = _state(
-        center_array + 0.08 * normal,
-        -angle_rad,
-        velocity_b_m_s=(0.0, 0.0, 0.4),
-    )
     return LandingMission(
-        approach_domain=_domain(anchor, attitude_radius=0.01),
         free_space=FreeSpace.box(center_array - 5.0, center_array + 5.0),
-        geometry=geometry,
         center_w_m=center_array,
         length_axis_w=length,
         width_axis_w=width,
@@ -172,9 +196,6 @@ def _landing_mission(
         normal_speed_max_m_s=0.8,
         tangential_speed_max_m_s=1.0,
         platform_clearance_m=0.005,
-        body_inflation_m=0.005,
-        position_error_m=0.005,
-        attitude_error_rad=0.005,
     )
 
 
@@ -202,8 +223,11 @@ def _landing_states(
     )
 
 
-def _prediction(mission: GateMission | LandingMission) -> Prediction:
-    geometry = mission.geometry
+def _prediction(
+    mission: GateMission | LandingMission,
+    generated: SimpleNamespace = GENERATED,
+) -> Prediction:
+    geometry = generated.geometry
     prediction = Prediction(
         1,
         body_count=geometry.body_b_m.shape[0],
@@ -283,17 +307,19 @@ def test_immutable_contract_data_and_mission_scale() -> None:
     assert np.ptp(MOEWE_GEOMETRY.body_b_m[:, 1]) == pytest.approx(0.764)
     assert np.ptp(MOEWE_GEOMETRY.body_b_m[:, 0]) > 0.6
     mission = _gate_mission()
-    assert isinstance(mission.approach_domain, ApproachDomain)
-    assert isinstance(mission.terminal_halfspaces, Halfspaces)
+    domain = _domain(mission)
+    terminal = mission.terminal_halfspaces(GENERATED)
+    assert isinstance(domain, CompilationDomain)
+    assert isinstance(terminal, Halfspaces)
     assert mission.free_space_halfspaces is mission.free_space.halfspaces
     for value in (
         MOEWE_GEOMETRY.body_b_m,
-        mission.approach_domain.lower,
-        mission.approach_domain.upper,
-        mission.approach_domain.center,
-        mission.approach_domain.radius,
-        mission.terminal_halfspaces.matrix,
-        mission.terminal_halfspaces.bounds,
+        domain.lower,
+        domain.upper,
+        domain.center,
+        domain.radius,
+        terminal.matrix,
+        terminal.bounds,
     ):
         assert not value.flags.writeable
 
@@ -317,32 +343,39 @@ def test_translated_rotated_gate_and_full_frame_rejection(angle_rad: float) -> N
 
     mission = _gate_mission(angle_rad=angle_rad)
     states = _gate_states(mission)
-    assert mission.realized(states)
-    assert np.allclose(mission.error(states[3]), 0.0, atol=1.0e-12)
+    assert mission.realized(states, GENERATED)
+    assert np.allclose(mission.error(states[3], GENERATED), 0.0, atol=1.0e-12)
     assert mission.distance(states[0]) == pytest.approx(0.8)
-    assert mission.terminal_halfspaces.contains(mission.error(states[3]))
+    assert mission.terminal_halfspaces(GENERATED).contains(
+        mission.error(states[3], GENERATED)
+    )
 
     narrow = _gate_mission(angle_rad=angle_rad, width_m=0.75)
-    assert not narrow.realized(_gate_states(narrow))
+    assert not narrow.realized(_gate_states(narrow), GENERATED)
 
 
 def test_gate_error_uses_body_relative_center_flow() -> None:
     """Use the same air-relative speed coordinate as robust support bounds."""
 
-    mission = replace(
-        _gate_mission(),
-        center_flow_b_m_s=np.array((2.0, 0.0, 0.0)),
-    )
+    mission = _gate_mission()
+    generated = _generated(center_flow_b_m_s=(2.0, 0.0, 0.0))
     state = _gate_states(mission)[3]
     state[6] += 2.0
-    assert mission.error(state)[-1] == pytest.approx(0.0)
+    assert mission.error(state, generated)[-1] == pytest.approx(0.0)
 
-    prediction = _prediction(mission)
+    prediction = _prediction(mission, generated)
     prediction.state_center[5] = state
-    prediction.flow_center[:] = mission.center_flow_b_m_s
-    for facet in mission.terminal_halfspaces.matrix[-2:]:
-        offset, reference = error_support(mission, prediction, 5, facet)
-        assert offset == pytest.approx(float(facet @ mission.error(state)))
+    prediction.flow_center[:] = (2.0, 0.0, 0.0)
+    for facet in mission.terminal_halfspaces(generated).matrix[-2:]:
+        offset, reference = error_support(
+            mission,
+            prediction,
+            5,
+            facet,
+            generated,
+            _domain(mission),
+        )
+        assert offset == pytest.approx(float(facet @ mission.error(state, generated)))
         np.testing.assert_array_equal(reference, np.zeros(3))
 
 
@@ -351,23 +384,23 @@ def test_gate_monitor_matches_simulator() -> None:
 
     mission = _gate_mission(angle_rad=radians(29.0))
     simulator = Gate(
-        mission.geometry,
+        GENERATED.geometry,
         mission.center_w_m,
         mission.normal_w,
         mission.width_axis_w,
         mission.width_m,
         mission.height_m,
         mission.frame_clearance_m,
-        mission.body_inflation_m,
-        mission.position_error_m,
-        mission.attitude_error_rad,
+        GENERATED.bounds.body_inflation_m,
+        GENERATED.bounds.mission_position_error_abs_m,
+        GENERATED.bounds.mission_attitude_error_abs_rad,
     )
     states = _gate_states(mission)
     missed = states.copy()
     missed[:, :3] += 0.7 * mission.width_axis_w
-    assert mission.realized(states) == simulator.passed(states)
-    assert mission.realized(missed) == simulator.passed(missed)
-    assert not mission.realized(missed)
+    assert mission.realized(states, GENERATED) == simulator.passed(states)
+    assert mission.realized(missed, GENERATED) == simulator.passed(missed)
+    assert not mission.realized(missed, GENERATED)
 
 
 @pytest.mark.parametrize("angle_rad", (0.0, radians(41.0)))
@@ -376,15 +409,15 @@ def test_translated_rotated_landing_first_contact(angle_rad: float) -> None:
 
     mission = _landing_mission(angle_rad=angle_rad)
     states = _landing_states(mission)
-    assert mission.realized(states)
+    assert mission.realized(states, GENERATED)
     state = _state(
         mission.center_w_m + np.array([0.0, 0.0, 0.04]),
         -angle_rad,
         velocity_b_m_s=(0.0, 0.0, 0.4),
     )
-    error = mission.error(state)
+    error = mission.error(state, GENERATED)
     normal = np.cross(mission.length_axis_w, mission.width_axis_w)
-    velocity = point_velocities(state, mission.geometry.contact_b_m)
+    velocity = point_velocities(state, GENERATED.geometry.contact_b_m)
     expected_velocity = np.column_stack(
         (
             -velocity @ normal,
@@ -394,10 +427,10 @@ def test_translated_rotated_landing_first_contact(angle_rad: float) -> None:
     ).reshape(-1)
     assert error.shape == (5 + 3 * velocity.shape[0],)
     np.testing.assert_allclose(error[5:], expected_velocity, atol=1.0e-12)
-    assert mission.terminal_halfspaces.contains(error)
+    assert mission.terminal_halfspaces(GENERATED).contains(error)
 
     narrow = _landing_mission(angle_rad=angle_rad, width_m=0.75)
-    assert not narrow.realized(_landing_states(narrow))
+    assert not narrow.realized(_landing_states(narrow), GENERATED)
 
 
 def test_landing_rejects_unapproved_first_contact_and_angular_speed() -> None:
@@ -409,13 +442,14 @@ def test_landing_rejects_unapproved_first_contact_and_angular_speed() -> None:
         MOEWE_GEOMETRY.contact_b_m,
         MOEWE_GEOMETRY.footprint_b_m,
     )
-    collision = _landing_mission(geometry=unapproved)
-    assert not collision.realized(_landing_states(collision))
+    collision = _landing_mission()
+    collision_aircraft = _generated(unapproved)
+    assert not collision.realized(_landing_states(collision), collision_aircraft)
 
     mission = _landing_mission()
     rotating = _landing_states(mission, rates_b_rad_s=(8.0, 0.0, 0.0))
-    assert not mission.realized(rotating)
-    contact_velocity = point_velocities(rotating[-1], mission.geometry.contact_b_m)
+    assert not mission.realized(rotating, GENERATED)
+    contact_velocity = point_velocities(rotating[-1], GENERATED.geometry.contact_b_m)
     assert np.ptp(contact_velocity[:, 2]) > 1.0
 
 
@@ -426,9 +460,9 @@ def test_landing_rejects_tangential_speed_and_touchdown_attitude() -> None:
     fast = _landing_states(mission, velocity_b_m_s=(2.0, 0.0, 0.4))
     rolled = _landing_states(mission, roll_rad=radians(20.0))
     pitched = _landing_states(mission, pitch_rad=radians(15.0))
-    assert not mission.realized(fast)
-    assert not mission.realized(rolled)
-    assert not mission.realized(pitched)
+    assert not mission.realized(fast, GENERATED)
+    assert not mission.realized(rolled, GENERATED)
+    assert not mission.realized(pitched, GENERATED)
 
 
 def test_landing_monitor_matches_simulator() -> None:
@@ -436,7 +470,7 @@ def test_landing_monitor_matches_simulator() -> None:
 
     mission = _landing_mission(angle_rad=radians(-33.0))
     simulator = Platform(
-        mission.geometry,
+        GENERATED.geometry,
         mission.center_w_m,
         mission.length_axis_w,
         mission.width_axis_w,
@@ -448,16 +482,16 @@ def test_landing_monitor_matches_simulator() -> None:
         mission.touchdown_pitch_rad,
         mission.pitch_error_abs_max_rad,
         mission.platform_clearance_m,
-        mission.body_inflation_m,
-        mission.position_error_m,
-        mission.attitude_error_rad,
+        GENERATED.bounds.body_inflation_m,
+        GENERATED.bounds.mission_position_error_abs_m,
+        GENERATED.bounds.mission_attitude_error_abs_rad,
     )
     states = _landing_states(mission)
     missed = states.copy()
     missed[:, :3] += 0.7 * mission.width_axis_w
-    assert mission.realized(states) == simulator.landed(states)
-    assert mission.realized(missed) == simulator.landed(missed)
-    assert not mission.realized(missed)
+    assert mission.realized(states, GENERATED) == simulator.landed(states)
+    assert mission.realized(missed, GENERATED) == simulator.landed(missed)
+    assert not mission.realized(missed, GENERATED)
 
 
 def test_terminal_support_rows_are_affine_and_deterministic() -> None:
@@ -465,9 +499,18 @@ def test_terminal_support_rows_are_affine_and_deterministic() -> None:
 
     gate = _gate_mission(angle_rad=radians(17.0))
     gate_prediction = _prediction(gate)
-    first_a, first_b = gate.terminal_support_constraints(gate_prediction)
-    second_a, second_b = gate.terminal_support_constraints(gate_prediction)
-    body_count = gate.geometry.body_b_m.shape[0]
+    domain = _domain(gate)
+    first_a, first_b = gate.terminal_support_constraints(
+        gate_prediction,
+        GENERATED,
+        domain,
+    )
+    second_a, second_b = gate.terminal_support_constraints(
+        gate_prediction,
+        GENERATED,
+        domain,
+    )
+    body_count = GENERATED.geometry.body_b_m.shape[0]
     gate_rows = 42 * body_count + 11 * 8
     assert first_a.shape == (gate_rows, 3)
     assert first_b.shape == (gate_rows,)
@@ -478,11 +521,20 @@ def test_terminal_support_rows_are_affine_and_deterministic() -> None:
 
     landing = _landing_mission(angle_rad=radians(-21.0))
     landing_prediction = _prediction(landing)
-    first_a, first_b = landing.terminal_support_constraints(landing_prediction)
-    second_a, second_b = landing.terminal_support_constraints(landing_prediction)
-    body_count = landing.geometry.body_b_m.shape[0]
-    contact_count = landing.geometry.contact_b_m.shape[0]
-    footprint_count = landing.geometry.footprint_b_m.shape[0]
+    domain = _domain(landing)
+    first_a, first_b = landing.terminal_support_constraints(
+        landing_prediction,
+        GENERATED,
+        domain,
+    )
+    second_a, second_b = landing.terminal_support_constraints(
+        landing_prediction,
+        GENERATED,
+        domain,
+    )
+    body_count = GENERATED.geometry.body_b_m.shape[0]
+    contact_count = GENERATED.geometry.contact_b_m.shape[0]
+    footprint_count = GENERATED.geometry.footprint_b_m.shape[0]
     forbidden_count = body_count - contact_count
     rows = (
         9 * body_count
@@ -503,8 +555,12 @@ def test_preterminal_rows_cover_every_swept_body_point() -> None:
 
     for mission in (_gate_mission(), _landing_mission()):
         prediction = _prediction(mission)
-        matrix, bounds = preterminal_support_constraints(mission, prediction)
-        body_count = mission.geometry.body_b_m.shape[0]
+        matrix, bounds = preterminal_support_constraints(
+            mission,
+            prediction,
+            GENERATED,
+        )
+        body_count = GENERATED.geometry.body_b_m.shape[0]
         stages = prediction.body_center.shape[0]
         assert matrix.shape == (stages * body_count, 3)
         assert bounds.shape == (stages * body_count,)
@@ -515,8 +571,8 @@ def test_preterminal_rows_cover_every_swept_body_point() -> None:
         else:
             axis = -np.cross(mission.length_axis_w, mission.width_axis_w)
             clearance = mission.platform_clearance_m
-        radius = float(np.max(np.linalg.norm(mission.geometry.body_b_m, axis=1)))
-        limit = -(clearance + radius * mission.attitude_error_rad)
+        radius = float(np.max(np.linalg.norm(GENERATED.geometry.body_b_m, axis=1)))
+        limit = -(clearance + radius * GENERATED.bounds.mission_attitude_error_abs_rad)
         for stage in range(stages):
             for point in range(body_count):
                 offset, reference = prediction.body_support(stage, point, axis)
@@ -536,7 +592,11 @@ def test_preterminal_rows_reject_gate_crossing_and_platform_contact() -> None:
     gate_prediction.body_radius.fill(0.0)
     gate_prediction.body_center[:] = gate.center_w_m - gate.normal_w
     gate_prediction.body_center[4, 2] = gate.center_w_m + gate.normal_w
-    _, gate_bounds = preterminal_support_constraints(gate, gate_prediction)
+    _, gate_bounds = preterminal_support_constraints(
+        gate,
+        gate_prediction,
+        GENERATED,
+    )
     assert gate_bounds[4 * gate_prediction.body_count + 2] < 0.0
 
     landing = _landing_mission()
@@ -546,7 +606,11 @@ def test_preterminal_rows_reject_gate_crossing_and_platform_contact() -> None:
     landing_prediction.body_radius.fill(0.0)
     landing_prediction.body_center[:] = landing.center_w_m + normal
     landing_prediction.body_center[7, 5] = landing.center_w_m - normal
-    _, landing_bounds = preterminal_support_constraints(landing, landing_prediction)
+    _, landing_bounds = preterminal_support_constraints(
+        landing,
+        landing_prediction,
+        GENERATED,
+    )
     assert landing_bounds[7 * landing_prediction.body_count + 5] < 0.0
 
 
@@ -556,7 +620,14 @@ def test_error_and_distance_support_contract() -> None:
     gate = _gate_mission(angle_rad=radians(23.0))
     prediction = _prediction(gate)
     lateral = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    offset, reference = error_support(gate, prediction, 5, lateral)
+    offset, reference = error_support(
+        gate,
+        prediction,
+        5,
+        lateral,
+        GENERATED,
+        _domain(gate),
+    )
     assert offset == pytest.approx(0.0, abs=1.0e-12)
     np.testing.assert_allclose(reference, gate.width_axis_w, atol=1.0e-12)
     offset, reference = distance_support(gate, prediction, 0, 1.0)
@@ -564,15 +635,29 @@ def test_error_and_distance_support_contract() -> None:
     np.testing.assert_allclose(reference, -gate.normal_w, atol=1.0e-12)
 
     heading = np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
-    offset, reference = error_support(gate, prediction, 5, heading)
+    offset, reference = error_support(
+        gate,
+        prediction,
+        5,
+        heading,
+        GENERATED,
+        _domain(gate),
+    )
     assert offset == pytest.approx(0.0, abs=1.0e-12)
     np.testing.assert_allclose(reference, np.zeros(3), atol=1.0e-12)
 
     landing = _landing_mission()
     prediction = _prediction(landing)
-    sink = np.zeros(5 + 3 * landing.geometry.contact_b_m.shape[0])
+    sink = np.zeros(5 + 3 * GENERATED.geometry.contact_b_m.shape[0])
     sink[5] = 1.0
-    offset, reference = error_support(landing, prediction, 9, sink)
+    offset, reference = error_support(
+        landing,
+        prediction,
+        9,
+        sink,
+        GENERATED,
+        _domain(landing),
+    )
     assert offset == pytest.approx(0.4)
     np.testing.assert_allclose(reference, np.zeros(3), atol=1.0e-12)
 
@@ -581,9 +666,9 @@ def test_landing_terminal_set_covers_every_contact_velocity_component() -> None:
     """Bind three velocity coordinates for every permitted contact point."""
 
     mission = _landing_mission()
-    contact_count = mission.geometry.contact_b_m.shape[0]
+    contact_count = GENERATED.geometry.contact_b_m.shape[0]
     dimension = 5 + 3 * contact_count
-    terminal = mission.terminal_halfspaces
+    terminal = mission.terminal_halfspaces(GENERATED)
     tangent_limit = mission.tangential_speed_max_m_s / sqrt(2.0)
     assert terminal.matrix.shape == (2 * dimension, dimension)
     lower = -terminal.bounds[dimension:]
@@ -607,11 +692,18 @@ def test_landing_error_support_covers_positive_and_negative_velocity_facets() ->
     prediction.state_center[stage, 6:12] = (0.3, -0.2, 0.4, 0.7, -0.5, 0.9)
     prediction.contact_velocity_center[stage] = point_velocities(
         prediction.state_center[stage],
-        mission.geometry.contact_b_m,
+        GENERATED.geometry.contact_b_m,
     )
-    predicted_error = mission.error(prediction.state_center[stage])
-    for facet in mission.terminal_halfspaces.matrix:
-        offset, reference = error_support(mission, prediction, stage, facet)
+    predicted_error = mission.error(prediction.state_center[stage], GENERATED)
+    for facet in mission.terminal_halfspaces(GENERATED).matrix:
+        offset, reference = error_support(
+            mission,
+            prediction,
+            stage,
+            facet,
+            GENERATED,
+            _domain(mission),
+        )
         assert offset == pytest.approx(float(facet @ predicted_error))
         if np.any(facet[5:] != 0.0):
             np.testing.assert_allclose(reference, np.zeros(3), atol=1.0e-12)
@@ -633,12 +725,16 @@ def test_gate_event_rows_cover_every_horizon_endpoint(
     """Enforce heading, attitude, and speed at every crossing-horizon endpoint."""
 
     mission = _gate_mission()
-    geometry_rows = 42 * mission.geometry.body_b_m.shape[0]
+    geometry_rows = 42 * GENERATED.geometry.body_b_m.shape[0]
     event_rows_per_stage = 8
     for stage in range(11):
         prediction = _prediction(mission)
         prediction.state_center[stage, coordinate] = value
-        _, bounds = mission.terminal_support_constraints(prediction)
+        _, bounds = mission.terminal_support_constraints(
+            prediction,
+            GENERATED,
+            _domain(mission),
+        )
         first = geometry_rows + stage * event_rows_per_stage
         assert np.min(bounds[first : first + event_rows_per_stage]) < 0.0
 
@@ -653,7 +749,11 @@ def test_landing_event_rows_cover_both_segment_endpoints(
     mission = _landing_mission()
     prediction = _prediction(mission)
     prediction.state_center[stage, coordinate] = radians(25.0)
-    _, bounds = mission.terminal_support_constraints(prediction)
+    _, bounds = mission.terminal_support_constraints(
+        prediction,
+        GENERATED,
+        _domain(mission),
+    )
     block = 0 if stage == 9 else 1
     first = bounds.size - 20 + 10 * block
     attitude = bounds[first + np.array((3, 4, 8, 9))]
@@ -669,9 +769,10 @@ def test_terminal_error_support_is_feasible_for_narrow_predicted_tubes() -> None
     )
     for mission, stage in cases:
         prediction = _prediction(mission)
+        terminal = mission.terminal_halfspaces(GENERATED)
         for facet, bound in zip(
-            mission.terminal_halfspaces.matrix,
-            mission.terminal_halfspaces.bounds,
+            terminal.matrix,
+            terminal.bounds,
             strict=True,
         ):
             offset, reference = error_support(
@@ -679,6 +780,8 @@ def test_terminal_error_support_is_feasible_for_narrow_predicted_tubes() -> None
                 prediction,
                 stage,
                 facet,
+                GENERATED,
+                _domain(mission),
             )
             assert offset + reference @ np.zeros(3) <= bound + 1.0e-12
 
@@ -686,7 +789,6 @@ def test_terminal_error_support_is_feasible_for_narrow_predicted_tubes() -> None
 def test_mission_runtime_contract() -> None:
     mission = _gate_mission()
     required = (
-        "approach_domain",
         "error",
         "distance",
         "terminal_halfspaces",

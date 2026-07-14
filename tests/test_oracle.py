@@ -9,7 +9,7 @@ import pytest
 
 from control.flow import SHARED_FLOW_GENERATOR_COUNT, FlowBounds
 from control.interval import Interval, Zonotope
-from control.missions import ApproachDomain, FreeSpace, GateMission, LandingMission
+from control.missions import FreeSpace, GateMission, LandingMission
 from control.oracle import (
     GeometryEnclosure,
     NonlinearOracle,
@@ -502,39 +502,32 @@ def test_gate_event_enforces_terminal_air_data_and_attitude() -> None:
 
     oracle, _, _ = _setup()
     mission = GateMission(
-        ApproachDomain(-np.full(15, 20.0), np.full(15, 20.0)),
         FreeSpace.box((-10.0, -10.0, -10.0), (10.0, 10.0, 10.0)),
-        oracle.generated.geometry,
         center_w_m=(0.0, 0.0, 0.0),
         normal_w=(1.0, 0.0, 0.0),
         width_axis_w=(0.0, 1.0, 0.0),
         width_m=1.0,
         height_m=1.0,
-        center_flow_b_m_s=np.zeros(3),
         target_airspeed_m_s=5.0,
         heading_abs_max_rad=0.2,
         roll_abs_max_rad=0.2,
         pitch_bounds_rad=(-0.2, 0.2),
         airspeed_bounds_m_s=(4.5, 5.5),
         frame_clearance_m=0.0,
-        body_inflation_m=0.0,
-        position_error_m=0.0,
-        attitude_error_rad=0.0,
     )
     assert oracle._gate_event(_gate_prediction(oracle), mission)
     assert not oracle._gate_event(_gate_prediction(oracle, heading_rad=0.5), mission)
 
 
-def test_first_contact_signs_and_capture_domain() -> None:
+def test_first_contact_signs_and_aircraft_geometry() -> None:
     """Permit realization-dependent contact only through approved points."""
 
     oracle, _, _ = _setup()
     body = ((0.0, 0.0, -0.2), (-0.2, -0.2, 0.0), (-0.2, 0.2, 0.0))
     geometry = RigidBodyGeometry(body, body[1:], body[1:])
+    oracle = NonlinearOracle(replace(oracle.generated, geometry=geometry))
     mission = LandingMission(
-        ApproachDomain(-np.full(15, 20.0), np.full(15, 20.0)),
         FreeSpace.box((-10.0, -10.0, -10.0), (10.0, 10.0, 10.0)),
-        geometry,
         center_w_m=(0.0, 0.0, 0.0),
         length_axis_w=(1.0, 0.0, 0.0),
         width_axis_w=(0.0, 1.0, 0.0),
@@ -547,9 +540,6 @@ def test_first_contact_signs_and_capture_domain() -> None:
         normal_speed_max_m_s=1.0,
         tangential_speed_max_m_s=1.0,
         platform_clearance_m=0.0,
-        body_inflation_m=0.0,
-        position_error_m=0.0,
-        attitude_error_rad=0.0,
     )
     valid = _landing_prediction(oracle, geometry)
     assert oracle._landing_event(valid, mission)
