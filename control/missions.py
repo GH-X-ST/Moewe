@@ -1,208 +1,248 @@
-"""Tube-certified gate and landing missions."""
+"""Gate and landing descriptors for terminal capture."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from hashlib import sha256
-from math import radians
-from typing import Protocol
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from math import pi, sqrt
+from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
 import numpy.typing as npt
 
-from control.interval import Interval
-from control.tube import BodyTube, SegmentTube, body_points
 from models.geometry import (
     RigidBodyGeometry,
+    body_to_world,
     gate_crossing,
     orthogonal_axes,
     platform_landing,
     point_velocities,
-    world_points,
 )
 from models.state import as_state
 
-Vector3 = tuple[float, float, float]
-Bounds3D = tuple[
-    tuple[float, float],
-    tuple[float, float],
-    tuple[float, float],
-]
+if TYPE_CHECKING:
+    from control.predictor import Prediction
+
+
+@dataclass(frozen=True)
+class ApproachDomain:
+    """Complete bounded state fiber on which a mission is compiled."""
+
+    lower: npt.ArrayLike
+    upper: npt.ArrayLike
+    center: np.ndarray = field(init=False)
+    radius: np.ndarray = field(init=False)
+
+    def __post_init__(self) -> None:
+        lower = _immutable(self.lower, (15,))
+        upper = _immutable(self.upper, (15,))
+        center = _immutable(0.5 * (lower + upper), (15,))
+        radius = _immutable(0.5 * (upper - lower), (15,))
+        object.__setattr__(self, "lower", lower)
+        object.__setattr__(self, "upper", upper)
+        object.__setattr__(self, "center", center)
+        object.__setattr__(self, "radius", radius)
+
+    def contains(self, state: npt.ArrayLike) -> bool:
+        """Return whether a state belongs to the complete approach box."""
+
+        value = as_state(state)
+        return bool(np.all(value >= self.lower) and np.all(value <= self.upper))
+
+
+@dataclass(frozen=True)
+class Halfspaces:
+    """Immutable rows defining a convex set as ``matrix @ x <= bounds``."""
+
+    matrix: npt.ArrayLike
+    bounds: npt.ArrayLike
+
+    def __post_init__(self) -> None:
+        matrix = np.asarray(self.matrix, dtype=float)
+        bounds = np.asarray(self.bounds, dtype=float).reshape(-1)
+        if matrix.ndim != 2 or matrix.shape[0] != bounds.size:
+            raise ValueError("half-space rows and bounds must match")
+        matrix = matrix.copy()
+        bounds = bounds.copy()
+        matrix.flags.writeable = False
+        bounds.flags.writeable = False
+        object.__setattr__(self, "matrix", matrix)
+        object.__setattr__(self, "bounds", bounds)
+
+    @classmethod
+    def box(cls, lower: npt.ArrayLike, upper: npt.ArrayLike) -> Halfspaces:
+        """Return the half-spaces of an axis-aligned box."""
+
+        low = np.asarray(lower, dtype=float).reshape(-1)
+        high = np.asarray(upper, dtype=float).reshape(low.shape)
+        eye = np.eye(low.size)
+        return cls(
+            np.vstack((eye, -eye)),
+            np.concatenate((high, -low)),
+        )
+
+    def contains(self, value: npt.ArrayLike) -> bool:
+        """Return whether a point satisfies every half-space."""
+
+        point = np.asarray(value, dtype=float).reshape(self.matrix.shape[1])
+        return bool(np.all(self.matrix @ point <= self.bounds))
 
 
 @dataclass(frozen=True)
 class FreeSpace:
-    """Axis-aligned arena with optional forbidden boxes."""
+    """Convex planar free space for the complete occupied body."""
 
-    arena_m: Bounds3D
-    forbidden_m: tuple[Bounds3D, ...] = ()
+    halfspaces: Halfspaces
 
-    def contains(self, tube: BodyTube | SegmentTube) -> bool:
-        """Return whether every continuous occupied-body box is free."""
+    @classmethod
+    def box(cls, lower_w_m: npt.ArrayLike, upper_w_m: npt.ArrayLike) -> FreeSpace:
+        """Return an axis-aligned world-space flight volume."""
 
-        body = tube.body if isinstance(tube, SegmentTube) else tube
-        return all(self.contains_occupancy(item) for item in body.occupied)
-
-    def contains_occupancy(self, occupied: Interval) -> bool:
-        """Return whether one continuous occupied-body enclosure is free."""
-
-        lower, upper = _occupied_bounds(occupied)
-        arena_lower, arena_upper = _box_arrays(self.arena_m)
-        if np.any(lower <= arena_lower) or np.any(upper >= arena_upper):
-            return False
-        return all(
-            not _boxes_intersect(lower, upper, *(_box_arrays(box)))
-            for box in self.forbidden_m
-        )
-
-    def nominal_constraints(
-        self,
-        states: npt.ArrayLike,
-        geometry: RigidBodyGeometry,
-    ) -> np.ndarray:
-        """Return full-body free-space inequalities for nominal states."""
-
-        arena_lower, arena_upper = _box_arrays(self.arena_m)
-        values = []
-        for state in np.asarray(states, dtype=float).reshape(-1, 15):
-            points = world_points(state, geometry.body_b_m)
-            values.extend((points - arena_lower).reshape(-1))
-            values.extend((arena_upper - points).reshape(-1))
-            body_lower = np.min(points, axis=0)
-            body_upper = np.max(points, axis=0)
-            for box in self.forbidden_m:
-                box_lower, box_upper = _box_arrays(box)
-                separation = np.concatenate(
-                    (box_lower - body_upper, body_lower - box_upper)
-                )
-                values.append(float(np.max(separation)))
-        return np.asarray(values, dtype=float)
+        return cls(Halfspaces.box(lower_w_m, upper_w_m))
 
 
 class Mission(Protocol):
-    """Planning objective and robust terminal contract."""
+    """Manuscript terminal-mission contract."""
 
     @property
-    def identity(self) -> str:
-        """Return the immutable mission identity."""
+    def approach_domain(self) -> ApproachDomain:
+        """Return the compiled terminal-approach domain."""
 
         ...
 
-    def terminal(self, tubes: tuple[SegmentTube, ...]) -> bool:
-        """Return whether a complete tube sequence is safe and terminal."""
+    def error(self, state: npt.ArrayLike) -> np.ndarray:
+        """Return terminal-error coordinates."""
+
+        ...
+
+    def distance(self, state: npt.ArrayLike) -> float:
+        """Return remaining distance in the declared approach direction."""
+
+        ...
+
+    @property
+    def terminal_halfspaces(self) -> Halfspaces:
+        """Return the exact terminal error set."""
+
+        ...
+
+    @property
+    def free_space_halfspaces(self) -> Halfspaces:
+        """Return planar complete-body free-space constraints."""
 
         ...
 
     def realized(self, states: npt.ArrayLike) -> bool:
-        """Return whether a realized trajectory satisfies the terminal event."""
+        """Return whether measured states realize the terminal event."""
 
         ...
 
-    def running_cost(
+    def terminal_support_constraints(
         self,
-        state: npt.ArrayLike,
-        control: npt.ArrayLike,
-    ) -> float:
-        """Return one nominal performance cost."""
-
-        ...
-
-    def nominal_constraints(self, states: npt.ArrayLike) -> npt.ArrayLike:
-        """Return nominal inequalities that must be nonnegative."""
+        prediction: Prediction,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return affine reference rows for the robust terminal event."""
 
         ...
 
 
 @dataclass(frozen=True)
 class GateMission:
-    """Robust full-body passage through a rectangular aperture."""
+    """Full-body passage through a rectangular aperture."""
 
+    approach_domain: ApproachDomain
     free_space: FreeSpace
     geometry: RigidBodyGeometry
-    center_w_m: Vector3 = (6.6, 2.2, 1.4)
-    normal_w: Vector3 = (1.0, 0.0, 0.0)
-    width_axis_w: Vector3 = (0.0, 1.0, 0.0)
-    width_m: float = 1.2
-    height_m: float = 0.5
-    margin_m: float = 0.0
-    control_weight: float = 0.01
+    center_w_m: npt.ArrayLike
+    normal_w: npt.ArrayLike
+    width_axis_w: npt.ArrayLike
+    width_m: float
+    height_m: float
+    center_flow_b_m_s: npt.ArrayLike
+    target_airspeed_m_s: float
+    heading_abs_max_rad: float
+    roll_abs_max_rad: float
+    pitch_bounds_rad: tuple[float, float]
+    airspeed_bounds_m_s: tuple[float, float]
+    frame_clearance_m: float
+    body_inflation_m: float
+    position_error_m: float
+    attitude_error_rad: float
+    _terminal_halfspaces: Halfspaces = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         normal, width, _ = orthogonal_axes(self.normal_w, self.width_axis_w)
-        object.__setattr__(self, "normal_w", _vector(normal))
-        object.__setattr__(self, "width_axis_w", _vector(width))
-
-    @property
-    def identity(self) -> str:
-        """Return a deterministic gate-contract identity."""
-
-        return _identity(
-            "gate",
-            self.free_space,
-            self.center_w_m,
-            self.normal_w,
-            self.width_axis_w,
-            self.width_m,
-            self.height_m,
-            self.margin_m,
-            self.geometry,
+        object.__setattr__(self, "center_w_m", _immutable(self.center_w_m, (3,)))
+        object.__setattr__(self, "normal_w", _immutable(normal, (3,)))
+        object.__setattr__(self, "width_axis_w", _immutable(width, (3,)))
+        object.__setattr__(
+            self,
+            "center_flow_b_m_s",
+            _immutable(self.center_flow_b_m_s, (3,)),
         )
 
-    def terminal(self, tubes: tuple[SegmentTube, ...]) -> bool:
-        """Certify full-body passage without gate-frame contact."""
+        clearance = self._clearance
+        lower = np.array(
+            [
+                -0.5 * self.width_m + clearance,
+                -0.5 * self.height_m + clearance,
+                -self.heading_abs_max_rad,
+                -self.roll_abs_max_rad,
+                self.pitch_bounds_rad[0],
+                self.airspeed_bounds_m_s[0] - self.target_airspeed_m_s,
+            ]
+        )
+        upper = np.array(
+            [
+                0.5 * self.width_m - clearance,
+                0.5 * self.height_m - clearance,
+                self.heading_abs_max_rad,
+                self.roll_abs_max_rad,
+                self.pitch_bounds_rad[1],
+                self.airspeed_bounds_m_s[1] - self.target_airspeed_m_s,
+            ]
+        )
+        object.__setattr__(self, "_terminal_halfspaces", Halfspaces.box(lower, upper))
 
-        if not tubes:
-            return False
-        center = np.asarray(self.center_w_m, dtype=float)
-        normal = np.asarray(self.normal_w, dtype=float)
-        width = np.asarray(self.width_axis_w, dtype=float)
-        height = np.cross(normal, width)
-        start = body_points(tubes[0].initial, self.geometry.body_b_m)
-        end = body_points(tubes[-1].successor, self.geometry.body_b_m)
-        start_distance = _project(start, normal, center)
-        end_distance = _project(end, normal, center)
-        if np.max(start_distance.upper) >= 0.0:
-            return False
-        if np.min(end_distance.lower) <= 0.0:
-            return False
+    @property
+    def terminal_halfspaces(self) -> Halfspaces:
+        """Return aperture, heading, attitude, and airspeed limits."""
 
-        half_width = 0.5 * self.width_m - self.margin_m
-        half_height = 0.5 * self.height_m - self.margin_m
-        for tube in tubes[:-1]:
-            trailing = _project(
-                body_points(tube.successor, self.geometry.body_b_m),
-                normal,
-                center,
-            )
-            if not np.any(trailing.upper <= 0.0):
-                return False
-        pieces = tuple(occupied for tube in tubes for occupied in tube.body.occupied)
-        crosses_plane = False
-        for occupied in pieces:
-            distance = _project(occupied, normal, center)
-            if np.min(distance.lower) > 0.0 or np.max(distance.upper) < 0.0:
-                continue
-            crosses_plane = True
-            if not _inside_aperture(
-                occupied,
-                center,
-                width,
-                height,
-                half_width,
-                half_height,
-            ):
-                return False
-        if not crosses_plane:
-            return False
-        if not self.free_space.contains_occupancy(start):
-            return False
-        return all(self.free_space.contains_occupancy(occupied) for occupied in pieces)
+        return self._terminal_halfspaces
 
-    def realized(
-        self,
-        states: npt.ArrayLike,
-    ) -> bool:
-        """Evaluate passage on a realized dense trajectory."""
+    @property
+    def free_space_halfspaces(self) -> Halfspaces:
+        """Return planar complete-body free-space constraints."""
+
+        return self.free_space.halfspaces
+
+    def error(self, state: npt.ArrayLike) -> np.ndarray:
+        """Return aperture, heading, roll, pitch, and airspeed error."""
+
+        value = as_state(state)
+        height_axis = np.cross(self.normal_w, self.width_axis_w)
+        offset = value[:3] - self.center_w_m
+        heading = _wrap(_gate_yaw(self) - value[5])
+        airspeed = float(np.linalg.norm(value[6:9] - self.center_flow_b_m_s))
+        return np.array(
+            [
+                offset @ self.width_axis_w,
+                offset @ height_axis,
+                heading,
+                value[3],
+                value[4],
+                airspeed - self.target_airspeed_m_s,
+            ]
+        )
+
+    def distance(self, state: npt.ArrayLike) -> float:
+        """Return entrance-side distance along the crossing normal."""
+
+        position = as_state(state)[:3]
+        return float(-self.normal_w @ (position - self.center_w_m))
+
+    def realized(self, states: npt.ArrayLike) -> bool:
+        """Evaluate full-body gate passage from measured states."""
 
         return gate_crossing(
             states,
@@ -212,198 +252,224 @@ class GateMission:
             self.width_axis_w,
             self.width_m,
             self.height_m,
-            self.margin_m,
+            self.frame_clearance_m,
+            self.body_inflation_m,
+            self.position_error_m,
+            self.attitude_error_rad,
         )
 
-    def running_cost(
+    def terminal_support_constraints(
         self,
-        state: npt.ArrayLike,
-        control: npt.ArrayLike,
-    ) -> float:
-        """Penalize nominal gate-centre error and control effort."""
+        prediction: Prediction,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return conservative affine rows for robust gate crossing."""
 
-        offset = as_state(state)[:3] - np.asarray(self.center_w_m)
-        command = np.asarray(control, dtype=float).reshape(3)
-        return float(offset @ offset + self.control_weight * (command @ command))
-
-    def nominal_constraints(self, states: npt.ArrayLike) -> np.ndarray:
-        """Return nominal free-space and gate-passage inequalities."""
-
-        values = np.asarray(states, dtype=float).reshape(-1, 15)
-        center = np.asarray(self.center_w_m, dtype=float)
-        normal = np.asarray(self.normal_w, dtype=float)
-        width = np.asarray(self.width_axis_w, dtype=float)
-        height = np.cross(normal, width)
-        start = world_points(values[0], self.geometry.body_b_m)
-        end = world_points(values[-1], self.geometry.body_b_m)
-        constraints = list(
-            self.free_space.nominal_constraints(values[:-1], self.geometry)
+        stages = prediction.body_center.shape[0]
+        body_count = self.geometry.body_b_m.shape[0]
+        height = np.cross(self.normal_w, self.width_axis_w)
+        axes = (
+            self.width_axis_w,
+            -self.width_axis_w,
+            height,
+            -height,
         )
-        constraints.append(float(-np.max((start - center) @ normal)))
-        constraints.append(float(np.min((end - center) @ normal)))
-        half_width = 0.5 * self.width_m - self.margin_m
-        half_height = 0.5 * self.height_m - self.margin_m
-        constraints.extend(half_width - np.abs((end - center) @ width))
-        constraints.extend(half_height - np.abs((end - center) @ height))
-        return np.asarray(constraints, dtype=float)
+        limits = (
+            0.5 * self.width_m - self._support_clearance,
+            0.5 * self.width_m - self._support_clearance,
+            0.5 * self.height_m - self._support_clearance,
+            0.5 * self.height_m - self._support_clearance,
+        )
+        terminal = self.terminal_halfspaces
+        event_rows = np.flatnonzero(np.all(terminal.matrix[:, :2] == 0.0, axis=1))
+        row_count = body_count * (2 + 4 * stages) + (stages + 1) * event_rows.size
+        matrix = np.empty((row_count, 3))
+        bounds = np.empty(row_count)
+        row = 0
+        for point in self.geometry.body_b_m:
+            row = _body_state_row(
+                prediction,
+                self.approach_domain,
+                point.reshape(1, 3),
+                0,
+                self.normal_w,
+                self.center_w_m,
+                -self._clearance,
+                matrix,
+                bounds,
+                row,
+            )
+        for point in self.geometry.body_b_m:
+            row = _body_state_row(
+                prediction,
+                self.approach_domain,
+                point.reshape(1, 3),
+                stages,
+                -self.normal_w,
+                self.center_w_m,
+                -self._clearance,
+                matrix,
+                bounds,
+                row,
+            )
+        for stage in range(stages):
+            for axis, limit in zip(axes, limits, strict=True):
+                for point in range(body_count):
+                    row = _point_row(
+                        prediction.body_support,
+                        stage,
+                        point,
+                        axis,
+                        self.center_w_m,
+                        limit,
+                        matrix,
+                        bounds,
+                        row,
+                    )
+        for stage in range(stages + 1):
+            for terminal_row in event_rows:
+                offset, reference = error_support(
+                    self,
+                    prediction,
+                    stage,
+                    terminal.matrix[terminal_row],
+                )
+                matrix[row] = reference
+                bounds[row] = terminal.bounds[terminal_row] - offset
+                row += 1
+        return matrix, bounds
+
+    @property
+    def _clearance(self) -> float:
+        radius = float(np.max(np.linalg.norm(self.geometry.body_b_m, axis=1)))
+        return (
+            self.frame_clearance_m
+            + self.body_inflation_m
+            + self.position_error_m
+            + radius * self.attitude_error_rad
+        )
+
+    @property
+    def _support_clearance(self) -> float:
+        radius = float(np.max(np.linalg.norm(self.geometry.body_b_m, axis=1)))
+        return self.frame_clearance_m + radius * self.attitude_error_rad
 
 
 @dataclass(frozen=True)
 class LandingMission:
-    """Robust first-contact landing on a finite planar platform."""
+    """First-contact landing on a finite planar platform."""
 
+    approach_domain: ApproachDomain
     free_space: FreeSpace
     geometry: RigidBodyGeometry
-    center_w_m: Vector3 = (6.0, 2.2, 1.0)
-    length_axis_w: Vector3 = (1.0, 0.0, 0.0)
-    width_axis_w: Vector3 = (0.0, 1.0, 0.0)
-    length_m: float = 1.0
-    width_m: float = 1.0
-    normal_speed_max_m_s: float = 1.0
-    contact_speed_max_m_s: float = 5.0
-    roll_max_rad: float = radians(20.0)
-    pitch_bounds_rad: tuple[float, float] = (
-        radians(-10.0),
-        radians(25.0),
-    )
-    margin_m: float = 0.0
-    touchdown_pitch_rad: float = radians(4.0)
-    control_weight: float = 0.01
+    center_w_m: npt.ArrayLike
+    length_axis_w: npt.ArrayLike
+    width_axis_w: npt.ArrayLike
+    length_m: float
+    width_m: float
+    height_bounds_m: tuple[float, float]
+    roll_abs_max_rad: float
+    touchdown_pitch_rad: float
+    pitch_error_abs_max_rad: float
+    normal_speed_max_m_s: float
+    tangential_speed_max_m_s: float
+    platform_clearance_m: float
+    body_inflation_m: float
+    position_error_m: float
+    attitude_error_rad: float
+    _terminal_halfspaces: Halfspaces = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         length, width, _ = orthogonal_axes(
             self.length_axis_w,
             self.width_axis_w,
         )
-        object.__setattr__(self, "length_axis_w", _vector(length))
-        object.__setattr__(self, "width_axis_w", _vector(width))
+        object.__setattr__(self, "center_w_m", _immutable(self.center_w_m, (3,)))
+        object.__setattr__(self, "length_axis_w", _immutable(length, (3,)))
+        object.__setattr__(self, "width_axis_w", _immutable(width, (3,)))
+
+        clearance = self._clearance
+        tangent_limit = self.tangential_speed_max_m_s / sqrt(2.0)
+        velocity_lower = np.tile(
+            (0.0, -tangent_limit, -tangent_limit),
+            self.geometry.contact_b_m.shape[0],
+        )
+        velocity_upper = np.tile(
+            (self.normal_speed_max_m_s, tangent_limit, tangent_limit),
+            self.geometry.contact_b_m.shape[0],
+        )
+        lower = np.concatenate(
+            (
+                (
+                    -0.5 * self.length_m + clearance,
+                    -0.5 * self.width_m + clearance,
+                    self.height_bounds_m[0],
+                    -self.roll_abs_max_rad,
+                    -self.pitch_error_abs_max_rad,
+                ),
+                velocity_lower,
+            )
+        )
+        upper = np.concatenate(
+            (
+                (
+                    0.5 * self.length_m - clearance,
+                    0.5 * self.width_m - clearance,
+                    self.height_bounds_m[1],
+                    self.roll_abs_max_rad,
+                    self.pitch_error_abs_max_rad,
+                ),
+                velocity_upper,
+            )
+        )
+        object.__setattr__(self, "_terminal_halfspaces", Halfspaces.box(lower, upper))
 
     @property
-    def identity(self) -> str:
-        """Return a deterministic landing-contract identity."""
+    def terminal_halfspaces(self) -> Halfspaces:
+        """Return platform, attitude, and contact-velocity limits."""
 
-        return _identity(
-            "landing",
-            self.free_space,
-            self.center_w_m,
-            self.length_axis_w,
-            self.width_axis_w,
-            self.length_m,
-            self.width_m,
-            self.normal_speed_max_m_s,
-            self.contact_speed_max_m_s,
-            self.roll_max_rad,
-            self.pitch_bounds_rad,
-            self.margin_m,
-            self.geometry,
-        )
+        return self._terminal_halfspaces
 
-    def terminal(self, tubes: tuple[SegmentTube, ...]) -> bool:
-        """Certify realization-dependent first contact with the platform."""
+    @property
+    def free_space_halfspaces(self) -> Halfspaces:
+        """Return planar complete-body free-space constraints."""
 
-        if not tubes:
-            return False
-        preterminal = _landing_pieces(tubes[:-1])
-        pieces = _landing_pieces((tubes[-1],))
-        if not pieces:
-            return False
-        center = np.asarray(self.center_w_m, dtype=float)
-        length = np.asarray(self.length_axis_w, dtype=float)
-        width = np.asarray(self.width_axis_w, dtype=float)
-        normal = np.cross(length, width)
-        start_body = body_points(tubes[0].initial, self.geometry.body_b_m)
-        start_height = _project(start_body, normal, center)
-        if np.min(start_height.lower) <= 0.0:
-            return False
-        end_contact = body_points(
-            tubes[-1].successor,
-            self.geometry.contact_b_m,
-        )
-        if np.min(_project(end_contact, normal, center).upper) > 0.0:
-            return False
+        return self.free_space.halfspaces
 
-        candidate_indices = []
-        for index, (_, _, contact, _, _) in enumerate(pieces):
-            height = _project(contact, normal, center)
-            if np.any((height.lower <= 0.0) & (height.upper >= 0.0)):
-                candidate_indices.append(index)
-        if not candidate_indices:
-            return False
+    def error(self, state: npt.ArrayLike) -> np.ndarray:
+        """Return platform, attitude, and every contact-point velocity."""
 
-        first_candidate = candidate_indices[0]
-        last_candidate = candidate_indices[-1]
-        if not self.free_space.contains_occupancy(start_body):
-            return False
-        if not all(
-            self.free_space.contains_occupancy(occupied)
-            for _, occupied, _, _, _ in (preterminal + pieces[: last_candidate + 1])
-        ):
-            return False
-        for _, occupied, _, _, _ in preterminal + pieces[:first_candidate]:
-            if np.min(_project(occupied, normal, center).lower) <= 0.0:
-                return False
-
-        half_length = 0.5 * self.length_m - self.margin_m
-        half_width = 0.5 * self.width_m - self.margin_m
-        body_vertices = np.asarray(self.geometry.body_b_m, dtype=float).reshape(
-            -1,
-            3,
-        )
-        contact_points = np.asarray(
-            self.geometry.contact_b_m,
-            dtype=float,
-        ).reshape(-1, 3)
-        allowed_contact = np.any(
-            np.all(
-                np.isclose(
-                    body_vertices[:, None, :],
-                    contact_points[None, :, :],
+        value = as_state(state)
+        normal = np.cross(self.length_axis_w, self.width_axis_w)
+        offset = value[:3] - self.center_w_m
+        velocity = point_velocities(value, self.geometry.contact_b_m)
+        contact_velocity = np.column_stack(
+            (
+                -velocity @ normal,
+                velocity @ self.length_axis_w,
+                velocity @ self.width_axis_w,
+            )
+        ).reshape(-1)
+        return np.concatenate(
+            (
+                (
+                    offset @ self.length_axis_w,
+                    offset @ self.width_axis_w,
+                    offset @ normal,
+                    value[3],
+                    value[4] - self.touchdown_pitch_rad,
                 ),
-                axis=2,
-            ),
-            axis=1,
+                contact_velocity,
+            )
         )
-        for index in candidate_indices:
-            state, occupied, contact, footprint, velocity = pieces[index]
-            if np.any(~allowed_contact):
-                other = Interval(
-                    occupied.lower[~allowed_contact],
-                    occupied.upper[~allowed_contact],
-                )
-                if np.min(_project(other, normal, center).lower) <= 0.0:
-                    return False
-            if not _inside_aperture(
-                footprint,
-                center,
-                length,
-                width,
-                half_length,
-                half_width,
-            ):
-                return False
-            contact_height = _project(contact, normal, center)
-            meeting = (contact_height.lower <= 0.0) & (contact_height.upper >= 0.0)
-            if not _contact_velocity_valid(
-                Interval(velocity.lower[meeting], velocity.upper[meeting]),
-                normal,
-                self.normal_speed_max_m_s,
-                self.contact_speed_max_m_s,
-            ):
-                return False
-            if (
-                state.lower[3] < -self.roll_max_rad
-                or state.upper[3] > self.roll_max_rad
-                or state.lower[4] < self.pitch_bounds_rad[0]
-                or state.upper[4] > self.pitch_bounds_rad[1]
-            ):
-                return False
-        return True
 
-    def realized(
-        self,
-        states: npt.ArrayLike,
-    ) -> bool:
-        """Evaluate first contact on a realized dense trajectory."""
+    def distance(self, state: npt.ArrayLike) -> float:
+        """Return distance along the declared platform approach axis."""
+
+        position = as_state(state)[:3]
+        return float(-self.length_axis_w @ (position - self.center_w_m))
+
+    def realized(self, states: npt.ArrayLike) -> bool:
+        """Evaluate admissible first contact from measured states."""
 
         return platform_landing(
             states,
@@ -414,161 +480,355 @@ class LandingMission:
             self.length_m,
             self.width_m,
             self.normal_speed_max_m_s,
-            self.contact_speed_max_m_s,
-            self.roll_max_rad,
-            self.pitch_bounds_rad,
-            self.margin_m,
+            self.tangential_speed_max_m_s,
+            self.roll_abs_max_rad,
+            self.pitch_error_abs_max_rad,
+            self.touchdown_pitch_rad,
+            self.platform_clearance_m,
+            self.body_inflation_m,
+            self.position_error_m,
+            self.attitude_error_rad,
         )
 
-    def running_cost(
+    def terminal_support_constraints(
         self,
-        state: npt.ArrayLike,
-        control: npt.ArrayLike,
-    ) -> float:
-        """Penalize nominal touchdown error and control effort."""
+        prediction: Prediction,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return conservative affine rows for robust first contact."""
 
-        value = as_state(state)
-        offset = value[:3] - np.asarray(self.center_w_m)
-        pitch_error = value[4] - self.touchdown_pitch_rad
-        command = np.asarray(control, dtype=float).reshape(3)
-        return float(
-            offset @ offset
-            + 0.1 * (value[6:9] @ value[6:9])
-            + pitch_error * pitch_error
-            + self.control_weight * (command @ command)
+        stages = prediction.body_center.shape[0]
+        last = stages - 1
+        normal = np.cross(self.length_axis_w, self.width_axis_w)
+        forbidden = _noncontact_indices(
+            self.geometry.body_b_m,
+            self.geometry.contact_b_m,
         )
+        body_count = self.geometry.body_b_m.shape[0]
+        contact_count = self.geometry.contact_b_m.shape[0]
+        footprint_count = self.geometry.footprint_b_m.shape[0]
+        terminal = self.terminal_halfspaces
+        state_rows = np.flatnonzero(np.any(terminal.matrix[:, :5] != 0.0, axis=1))
+        row_count = (
+            last * body_count
+            + contact_count
+            + forbidden.size
+            + 4 * footprint_count
+            + 6 * contact_count
+            + 2 * state_rows.size
+        )
+        matrix = np.empty((row_count, 3))
+        bounds = np.empty(row_count)
+        row = 0
 
-    def nominal_constraints(self, states: npt.ArrayLike) -> np.ndarray:
-        """Return nominal precontact and touchdown inequalities."""
-
-        values = np.asarray(states, dtype=float).reshape(-1, 15)
-        center = np.asarray(self.center_w_m, dtype=float)
-        length = np.asarray(self.length_axis_w, dtype=float)
-        width = np.asarray(self.width_axis_w, dtype=float)
-        normal = np.cross(length, width)
-        contact = world_points(values[-1], self.geometry.contact_b_m)
-        footprint = world_points(values[-1], self.geometry.footprint_b_m)
-        velocities = point_velocities(values[-1], self.geometry.contact_b_m)
-        height = (contact - center) @ normal
-        sink = -velocities @ normal
-        constraints = list(
-            self.free_space.nominal_constraints(values[:-1], self.geometry)
-        )
-        start = world_points(values[0], self.geometry.body_b_m)
-        constraints.append(float(np.min((start - center) @ normal)))
-        constraints.append(float(-np.min(height)))
-        constraints.extend(
-            0.5 * self.length_m - self.margin_m - np.abs((footprint - center) @ length)
-        )
-        constraints.extend(
-            0.5 * self.width_m - self.margin_m - np.abs((footprint - center) @ width)
-        )
-        constraints.extend(sink)
-        constraints.extend(self.normal_speed_max_m_s - sink)
-        constraints.extend(
-            self.contact_speed_max_m_s - np.linalg.norm(velocities, axis=1)
-        )
-        constraints.extend(
-            (
-                self.roll_max_rad - abs(values[-1, 3]),
-                values[-1, 4] - self.pitch_bounds_rad[0],
-                self.pitch_bounds_rad[1] - values[-1, 4],
+        for stage in range(last):
+            for point in range(body_count):
+                row = _point_row(
+                    prediction.body_support,
+                    stage,
+                    point,
+                    -normal,
+                    self.center_w_m,
+                    -self._support_clearance,
+                    matrix,
+                    bounds,
+                    row,
+                )
+        for point in self.geometry.contact_b_m:
+            row = _body_state_row(
+                prediction,
+                self.approach_domain,
+                point.reshape(1, 3),
+                stages,
+                normal,
+                self.center_w_m,
+                self._clearance,
+                matrix,
+                bounds,
+                row,
             )
-        )
-        return np.asarray(constraints, dtype=float)
-
-
-def _landing_pieces(
-    tubes: tuple[SegmentTube, ...],
-) -> tuple[tuple[Interval, Interval, Interval, Interval, Interval], ...]:
-    return tuple(
-        item
-        for tube in tubes
-        for item in zip(
-            tube.states,
-            tube.body.occupied,
-            tube.body.contact,
-            tube.body.footprint,
-            tube.body.contact_velocity,
-            strict=True,
-        )
-    )
-
-
-def _project(points: Interval, axis: np.ndarray, origin: np.ndarray) -> Interval:
-    return ((points - origin) * axis).sum(axis=-1)
-
-
-def _inside_aperture(
-    points: Interval,
-    center: np.ndarray,
-    first_axis: np.ndarray,
-    second_axis: np.ndarray,
-    first_half_extent: float,
-    second_half_extent: float,
-) -> bool:
-    first = _project(points, first_axis, center)
-    second = _project(points, second_axis, center)
-    return bool(
-        np.min(first.lower) > -first_half_extent
-        and np.max(first.upper) < first_half_extent
-        and np.min(second.lower) > -second_half_extent
-        and np.max(second.upper) < second_half_extent
-    )
-
-
-def _contact_velocity_valid(
-    velocity: Interval,
-    normal: np.ndarray,
-    normal_speed_max_m_s: float,
-    contact_speed_max_m_s: float,
-) -> bool:
-    normal_velocity = _project(velocity, normal, np.zeros(3))
-    speed_upper = velocity.square().sum(axis=1).sqrt().upper
-    return bool(
-        np.min(normal_velocity.lower) >= -normal_speed_max_m_s
-        and np.max(normal_velocity.upper) <= 0.0
-        and np.max(speed_upper) <= contact_speed_max_m_s
-    )
-
-
-def _occupied_bounds(occupied: Interval) -> tuple[np.ndarray, np.ndarray]:
-    lower = occupied.lower.reshape(-1, 3)
-    upper = occupied.upper.reshape(-1, 3)
-    return np.min(lower, axis=0), np.max(upper, axis=0)
-
-
-def _box_arrays(bounds: Bounds3D) -> tuple[np.ndarray, np.ndarray]:
-    values = np.asarray(bounds, dtype=float)
-    return values[:, 0], values[:, 1]
-
-
-def _boxes_intersect(
-    first_lower: np.ndarray,
-    first_upper: np.ndarray,
-    second_lower: np.ndarray,
-    second_upper: np.ndarray,
-) -> bool:
-    return bool(
-        np.all(first_upper >= second_lower) and np.all(first_lower <= second_upper)
-    )
-
-
-def _vector(value: np.ndarray) -> Vector3:
-    return tuple(float(component) for component in value)
-
-
-def _identity(name: str, *values: object) -> str:
-    digest = sha256(name.encode("ascii"))
-    for value in values:
-        if isinstance(value, RigidBodyGeometry):
-            arrays = (
-                value.body_b_m,
-                value.contact_b_m,
-                value.footprint_b_m,
+        for point in forbidden:
+            row = _point_row(
+                prediction.body_support,
+                last,
+                int(point),
+                -normal,
+                self.center_w_m,
+                -self._support_clearance,
+                matrix,
+                bounds,
+                row,
             )
-            for array in arrays:
-                digest.update(np.asarray(array, dtype=float).tobytes())
-        else:
-            digest.update(repr(value).encode("utf-8"))
-    return digest.hexdigest()
+
+        footprint_axes = (
+            self.length_axis_w,
+            -self.length_axis_w,
+            self.width_axis_w,
+            -self.width_axis_w,
+        )
+        footprint_limits = (
+            0.5 * self.length_m - self._support_clearance,
+            0.5 * self.length_m - self._support_clearance,
+            0.5 * self.width_m - self._support_clearance,
+            0.5 * self.width_m - self._support_clearance,
+        )
+        for axis, limit in zip(footprint_axes, footprint_limits, strict=True):
+            for point in range(footprint_count):
+                row = _point_row(
+                    prediction.footprint_support,
+                    last,
+                    point,
+                    axis,
+                    self.center_w_m,
+                    limit,
+                    matrix,
+                    bounds,
+                    row,
+                )
+
+        tangent_limit = self.tangential_speed_max_m_s / sqrt(2.0)
+        velocity_axes = (
+            (normal, 0.0),
+            (-normal, self.normal_speed_max_m_s),
+            (self.length_axis_w, tangent_limit),
+            (-self.length_axis_w, tangent_limit),
+            (self.width_axis_w, tangent_limit),
+            (-self.width_axis_w, tangent_limit),
+        )
+        for point in range(contact_count):
+            for axis, limit in velocity_axes:
+                row = _point_row(
+                    prediction.contact_velocity_support,
+                    last,
+                    point,
+                    axis,
+                    np.zeros(3),
+                    limit,
+                    matrix,
+                    bounds,
+                    row,
+                )
+        for stage in (last, stages):
+            for terminal_row in state_rows:
+                offset, reference = error_support(
+                    self,
+                    prediction,
+                    stage,
+                    terminal.matrix[terminal_row],
+                )
+                matrix[row] = reference
+                bounds[row] = terminal.bounds[terminal_row] - offset
+                row += 1
+        return matrix, bounds
+
+    @property
+    def _clearance(self) -> float:
+        radius = float(np.max(np.linalg.norm(self.geometry.body_b_m, axis=1)))
+        return (
+            self.platform_clearance_m
+            + self.body_inflation_m
+            + self.position_error_m
+            + radius * self.attitude_error_rad
+        )
+
+    @property
+    def _support_clearance(self) -> float:
+        radius = float(np.max(np.linalg.norm(self.geometry.body_b_m, axis=1)))
+        return self.platform_clearance_m + radius * self.attitude_error_rad
+
+
+def error_support(
+    mission: Mission,
+    prediction: Prediction,
+    stage: int,
+    facet: npt.ArrayLike,
+) -> tuple[float, np.ndarray]:
+    """Return an affine upper support bound for one terminal-error facet."""
+
+    direction = np.zeros(15)
+    if isinstance(mission, GateMission):
+        row = np.asarray(facet, dtype=float).reshape(6)
+        height = np.cross(mission.normal_w, mission.width_axis_w)
+        position_axis = row[0] * mission.width_axis_w + row[1] * height
+        direction[:3] = position_axis
+        direction[3] = row[3]
+        direction[4] = row[4]
+        direction[5] = -row[2]
+        offset, reference = prediction.state_support(stage, direction)
+        offset -= float(position_axis @ mission.center_w_m)
+        offset += row[2] * _gate_yaw(mission)
+        offset -= row[5] * mission.target_airspeed_m_s
+        offset += abs(row[2]) * _heading_residual(mission)
+        speed_offset, speed_reference = prediction.airspeed_support(
+            stage,
+            row[5],
+        )
+        offset += speed_offset
+        reference += speed_reference
+        return offset, reference
+
+    landing = cast(LandingMission, mission)
+    contact_count = landing.geometry.contact_b_m.shape[0]
+    row = np.asarray(facet, dtype=float).reshape(5 + 3 * contact_count)
+    normal = np.cross(landing.length_axis_w, landing.width_axis_w)
+    position_axis = (
+        row[0] * landing.length_axis_w + row[1] * landing.width_axis_w + row[2] * normal
+    )
+    direction[:3] = position_axis
+    direction[3] = row[3]
+    direction[4] = row[4]
+    offset, reference = prediction.state_support(stage, direction)
+    offset -= float(position_axis @ landing.center_w_m)
+    offset -= row[4] * landing.touchdown_pitch_rad
+    for point, velocity_row in enumerate(row[5:].reshape(contact_count, 3)):
+        if not np.any(velocity_row):
+            continue
+        velocity_direction = (
+            -velocity_row[0] * normal
+            + velocity_row[1] * landing.length_axis_w
+            + velocity_row[2] * landing.width_axis_w
+        )
+        velocity_offset, velocity_reference = prediction.contact_velocity_support(
+            stage,
+            point,
+            velocity_direction,
+        )
+        offset += velocity_offset
+        reference += velocity_reference
+    return offset, reference
+
+
+def preterminal_support_constraints(
+    mission: Mission,
+    prediction: Prediction,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Keep the swept body strictly before the mission contact surface."""
+
+    if isinstance(mission, GateMission):
+        axis = mission.normal_w
+        center = mission.center_w_m
+        clearance = mission._support_clearance
+    else:
+        landing = cast(LandingMission, mission)
+        axis = -np.cross(landing.length_axis_w, landing.width_axis_w)
+        center = landing.center_w_m
+        clearance = landing._support_clearance
+    stages = prediction.body_center.shape[0]
+    body_count = prediction.body_count
+    matrix = np.empty((stages * body_count, 3))
+    bounds = np.empty(stages * body_count)
+    row = 0
+    for stage in range(stages):
+        for point in range(body_count):
+            row = _point_row(
+                prediction.body_support,
+                stage,
+                point,
+                axis,
+                center,
+                -clearance,
+                matrix,
+                bounds,
+                row,
+            )
+    return matrix, bounds
+
+
+def distance_support(
+    mission: Mission,
+    prediction: Prediction,
+    stage: int,
+    sign: float,
+) -> tuple[float, np.ndarray]:
+    """Return the exact affine support of signed approach distance."""
+
+    if isinstance(mission, GateMission):
+        axis = mission.normal_w
+    else:
+        axis = cast(LandingMission, mission).length_axis_w
+    direction = np.zeros(15)
+    direction[:3] = -sign * axis
+    offset, reference = prediction.state_support(stage, direction)
+    if isinstance(mission, GateMission):
+        center = mission.center_w_m
+    else:
+        center = cast(LandingMission, mission).center_w_m
+    return offset + sign * float(axis @ center), reference
+
+
+def _body_state_row(
+    prediction: Prediction,
+    domain: ApproachDomain,
+    points_b_m: np.ndarray,
+    stage: int,
+    axis_w: np.ndarray,
+    origin_w_m: np.ndarray,
+    limit: float,
+    matrix: np.ndarray,
+    bounds: np.ndarray,
+    row: int,
+) -> int:
+    direction = np.zeros(15)
+    direction[:3] = axis_w
+    offset, reference = prediction.state_support(stage, direction)
+    support = _orientation_support(domain, points_b_m, axis_w)
+    matrix[row] = reference
+    bounds[row] = limit + axis_w @ origin_w_m - support - offset
+    return row + 1
+
+
+def _point_row(
+    support: Callable[[int, int, npt.ArrayLike], tuple[float, np.ndarray]],
+    stage: int,
+    point: int,
+    axis_w: np.ndarray,
+    origin_w_m: np.ndarray,
+    limit: float,
+    matrix: np.ndarray,
+    bounds: np.ndarray,
+    row: int,
+) -> int:
+    offset, reference = support(stage, point, axis_w)
+    matrix[row] = reference
+    bounds[row] = limit + axis_w @ origin_w_m - offset
+    return row + 1
+
+
+def _orientation_support(
+    domain: ApproachDomain,
+    points_b_m: np.ndarray,
+    axis_w: np.ndarray,
+) -> float:
+    rotation = body_to_world(domain.center[3:6])
+    nominal = points_b_m @ rotation.T @ axis_w
+    angle = min(float(np.sum(domain.radius[3:6])), 2.0)
+    residual = np.linalg.norm(points_b_m, axis=1) * angle
+    return float(np.max(nominal + residual))
+
+
+def _noncontact_indices(body: np.ndarray, contact: np.ndarray) -> np.ndarray:
+    permitted = np.any(
+        np.all(body[:, None] == contact[None, :], axis=2),
+        axis=1,
+    )
+    return np.flatnonzero(~permitted)
+
+
+def _gate_yaw(mission: GateMission) -> float:
+    return float(np.arctan2(-mission.normal_w[1], mission.normal_w[0]))
+
+
+def _wrap(angle: float) -> float:
+    return float(np.arctan2(np.sin(angle), np.cos(angle)))
+
+
+def _heading_residual(mission: GateMission) -> float:
+    desired = _gate_yaw(mission)
+    lower = desired - mission.approach_domain.upper[5]
+    upper = desired - mission.approach_domain.lower[5]
+    return 0.0 if lower >= -pi and upper <= pi else 2.0 * pi
+
+
+def _immutable(value: npt.ArrayLike, shape: tuple[int, ...]) -> np.ndarray:
+    array = np.asarray(value, dtype=float).reshape(shape).copy()
+    array.flags.writeable = False
+    return array

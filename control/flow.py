@@ -1,14 +1,28 @@
-"""Body-relative affine local-flow model."""
+"""Joint body-relative local-flow representation."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import numpy.typing as npt
 
 from control.interval import AffineForm, Interval, Zonotope
 
+FLOW_COMPONENT_ORDER = ("x", "y", "z")
+GRADIENT_COMPONENT_ORDER = (
+    (0, 0),
+    (0, 1),
+    (0, 2),
+    (1, 0),
+    (1, 1),
+    (1, 2),
+    (2, 0),
+    (2, 1),
+    (2, 2),
+)
+CENTER_FLOW_GENERATOR_COUNT = 3
+GRADIENT_FLOW_GENERATOR_COUNT = 9
 SHARED_FLOW_GENERATOR_COUNT = 12
 
 
@@ -23,26 +37,195 @@ class AffineFlow:
     def __post_init__(self) -> None:
         _set_array(self, "center_b_m_s", self.center_b_m_s, (3,))
         _set_array(self, "gradient_b_s", self.gradient_b_s, (3, 3))
-        remainder = np.asarray(self.remainder_b_m_s, dtype=float)
-        if remainder.shape[-1:] != (3,):
-            raise ValueError("flow remainder must end in three components")
-        _set_array(self, "remainder_b_m_s", remainder, remainder.shape)
+        _set_array(self, "remainder_b_m_s", self.remainder_b_m_s, (-1, 3))
 
     def strip_flow(self, strip_b_m: npt.ArrayLike) -> np.ndarray:
         """Return body-frame flow at each aerodynamic strip."""
 
         locations = np.asarray(strip_b_m, dtype=float).reshape(-1, 3)
-        center = np.asarray(self.center_b_m_s, dtype=float).reshape(3)
-        gradient = np.asarray(self.gradient_b_s, dtype=float).reshape(3, 3)
-        remainder = np.asarray(self.remainder_b_m_s, dtype=float).reshape(
-            locations.shape
+        return (
+            self.center_b_m_s + locations @ self.gradient_b_s.T + self.remainder_b_m_s
         )
-        return center + locations @ gradient.T + remainder
+
+
+@dataclass(frozen=True)
+class JointFlow:
+    """Immutable joint-flow factors at the centre and aerodynamic strips.
+
+    Gradient rows use the order ``G00, G01, G02, G10, ..., G22``. Generator
+    groups are centre, gradient, then strip-major ``x, y, z`` remainder.
+    """
+
+    strip_b_m: npt.ArrayLike
+    center_midpoint_b_m_s: npt.ArrayLike
+    center_generators_b_m_s: npt.ArrayLike
+    gradient_midpoint_b_s: npt.ArrayLike
+    gradient_generators_b_s: npt.ArrayLike
+    remainder_midpoint_b_m_s: npt.ArrayLike
+    remainder_generators_b_m_s: npt.ArrayLike
+    center: np.ndarray = field(init=False, repr=False)
+    generators: np.ndarray = field(init=False, repr=False)
+    center_factor_slice: slice = field(init=False)
+    gradient_factor_slice: slice = field(init=False)
+    remainder_factor_slice: slice = field(init=False)
+
+    def __post_init__(self) -> None:
+        _set_array(self, "strip_b_m", self.strip_b_m, (-1, 3))
+        strip_count = self.strip_b_m.shape[0]
+        _set_array(
+            self,
+            "center_midpoint_b_m_s",
+            self.center_midpoint_b_m_s,
+            (3,),
+        )
+        _set_matrix(
+            self,
+            "center_generators_b_m_s",
+            self.center_generators_b_m_s,
+            3,
+        )
+        _set_array(
+            self,
+            "gradient_midpoint_b_s",
+            self.gradient_midpoint_b_s,
+            (3, 3),
+        )
+        _set_matrix(
+            self,
+            "gradient_generators_b_s",
+            self.gradient_generators_b_s,
+            9,
+        )
+        _set_array(
+            self,
+            "remainder_midpoint_b_m_s",
+            self.remainder_midpoint_b_m_s,
+            (strip_count, 3),
+        )
+        _set_matrix(
+            self,
+            "remainder_generators_b_m_s",
+            self.remainder_generators_b_m_s,
+            3 * strip_count,
+        )
+
+        sample_locations = np.vstack((np.zeros(3), self.strip_b_m))
+        center_lift = np.tile(np.eye(3), (strip_count + 1, 1))
+        # Row-major vec(G) makes each block satisfy Q_i vec(G) = G q_i.
+        gradient_lift = np.vstack(
+            [np.kron(np.eye(3), location) for location in sample_locations]
+        )
+        remainder_midpoint = np.concatenate(
+            (np.zeros(3), self.remainder_midpoint_b_m_s.reshape(-1))
+        )
+        remainder_lift = np.vstack(
+            (
+                np.zeros((3, self.remainder_generators_b_m_s.shape[1])),
+                self.remainder_generators_b_m_s,
+            )
+        )
+        center = (
+            center_lift @ self.center_midpoint_b_m_s
+            + gradient_lift @ self.gradient_midpoint_b_s.reshape(-1)
+            + remainder_midpoint
+        )
+        generators = np.column_stack(
+            (
+                center_lift @ self.center_generators_b_m_s,
+                gradient_lift @ self.gradient_generators_b_s,
+                remainder_lift,
+            )
+        )
+        _set_array(self, "center", center, (3 * (strip_count + 1),))
+        _set_matrix(self, "generators", generators, self.center.size)
+
+        center_stop = self.center_generators_b_m_s.shape[1]
+        gradient_stop = center_stop + self.gradient_generators_b_s.shape[1]
+        object.__setattr__(self, "center_factor_slice", slice(0, center_stop))
+        object.__setattr__(
+            self,
+            "gradient_factor_slice",
+            slice(center_stop, gradient_stop),
+        )
+        object.__setattr__(
+            self,
+            "remainder_factor_slice",
+            slice(gradient_stop, self.generators.shape[1]),
+        )
+
+    @property
+    def strip_count(self) -> int:
+        """Return the number of aerodynamic strips."""
+
+        return int(self.strip_b_m.shape[0])
+
+    def evaluate(self, factors: npt.ArrayLike) -> np.ndarray:
+        """Evaluate the stacked centre and strip flow for one factor vector."""
+
+        coefficients = np.asarray(factors, dtype=float).reshape(
+            self.generators.shape[1]
+        )
+        return (self.center + self.generators @ coefficients).reshape(-1, 3)
+
+    def realization(self, factors: npt.ArrayLike) -> AffineFlow:
+        """Return the affine-flow fields represented by one factor vector."""
+
+        coefficients = np.asarray(factors, dtype=float).reshape(
+            self.generators.shape[1]
+        )
+        center = (
+            self.center_midpoint_b_m_s
+            + self.center_generators_b_m_s @ coefficients[self.center_factor_slice]
+        )
+        gradient = (
+            self.gradient_midpoint_b_s.reshape(-1)
+            + self.gradient_generators_b_s @ coefficients[self.gradient_factor_slice]
+        ).reshape(3, 3)
+        remainder = (
+            self.remainder_midpoint_b_m_s.reshape(-1)
+            + self.remainder_generators_b_m_s
+            @ coefficients[self.remainder_factor_slice]
+        ).reshape(self.strip_count, 3)
+        return AffineFlow(center, gradient, remainder)
+
+    def strip_flow(self, factors: npt.ArrayLike) -> np.ndarray:
+        """Evaluate body-frame flow at the aerodynamic strips."""
+
+        return self.evaluate(factors)[1:]
+
+    def zonotope(self) -> Zonotope:
+        """Return the exact stacked joint-flow zonotope."""
+
+        return Zonotope(self.center, self.generators)
+
+    def affine_form(self) -> AffineForm:
+        """Return the stacked joint flow as a shaped affine form."""
+
+        return AffineForm.from_zonotope(
+            self.zonotope(),
+            (self.strip_count + 1, 3),
+        )
+
+    def support(self, direction: npt.ArrayLike) -> float:
+        """Return joint-flow support in a stacked direction."""
+
+        return self.zonotope().support(direction)
+
+    def independent_hull(self) -> Interval:
+        """Return the box obtained by making every flow sample independent."""
+
+        return self.zonotope().interval_hull()
+
+    def independent_support(self, direction: npt.ArrayLike) -> float:
+        """Return support after replacing the joint flow by independent boxes."""
+
+        vector = np.asarray(direction, dtype=float).reshape(self.center.shape)
+        return self.independent_hull().support(vector)
 
 
 @dataclass(frozen=True)
 class FlowBounds:
-    """Amplitude bounds for arbitrarily time-varying affine flow."""
+    """Box bounds compiled into the joint-flow factorization."""
 
     center_lower_m_s: npt.ArrayLike
     center_upper_m_s: npt.ArrayLike
@@ -51,133 +234,48 @@ class FlowBounds:
     remainder_abs_m_s: npt.ArrayLike
 
     def __post_init__(self) -> None:
-        fields = (
-            ("center_lower_m_s", self.center_lower_m_s, (3,)),
-            ("center_upper_m_s", self.center_upper_m_s, (3,)),
-            ("gradient_lower_s", self.gradient_lower_s, (3, 3)),
-            ("gradient_upper_s", self.gradient_upper_s, (3, 3)),
-            ("remainder_abs_m_s", self.remainder_abs_m_s, (3,)),
+        _set_array(self, "center_lower_m_s", self.center_lower_m_s, (3,))
+        _set_array(self, "center_upper_m_s", self.center_upper_m_s, (3,))
+        _set_array(self, "gradient_lower_s", self.gradient_lower_s, (3, 3))
+        _set_array(self, "gradient_upper_s", self.gradient_upper_s, (3, 3))
+        _set_array(self, "remainder_abs_m_s", self.remainder_abs_m_s, (3,))
+
+    def joint_flow(self, strip_b_m: npt.ArrayLike) -> JointFlow:
+        """Compile box bounds into the exact joint-flow factorization."""
+
+        locations = np.asarray(strip_b_m, dtype=float).reshape(-1, 3)
+        center = Interval(self.center_lower_m_s, self.center_upper_m_s)
+        gradient = Interval(self.gradient_lower_s, self.gradient_upper_s)
+        remainder_radius = np.broadcast_to(
+            self.remainder_abs_m_s,
+            locations.shape,
         )
-        for name, value, shape in fields:
-            _set_array(self, name, value, shape)
-        if np.any(self.center_lower_m_s > self.center_upper_m_s):
-            raise ValueError("flow center bounds are empty")
-        if np.any(self.gradient_lower_s > self.gradient_upper_s):
-            raise ValueError("flow gradient bounds are empty")
-        if np.any(self.remainder_abs_m_s < 0.0):
-            raise ValueError("flow remainder bounds must be nonnegative")
+        return JointFlow(
+            locations,
+            center.center,
+            np.diag(center.radius),
+            gradient.center,
+            np.diag(gradient.radius.reshape(-1)),
+            np.zeros_like(locations),
+            np.diag(remainder_radius.reshape(-1)),
+        )
 
     def strip_bounds(
         self,
         strip_b_m: npt.ArrayLike,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Return interval bounds for all body-frame strip flows."""
+        """Return independent interval bounds for all strip flows."""
 
-        locations = np.asarray(strip_b_m, dtype=float).reshape(-1, 3)
-        center = Interval(self.center_lower_m_s, self.center_upper_m_s)
-        gradient = Interval(self.gradient_lower_s, self.gradient_upper_s)
-        remainder = Interval(
-            -self.remainder_abs_m_s,
-            self.remainder_abs_m_s,
-        )
-        strips = [
-            center + _gradient_at(gradient, location) + remainder
-            for location in locations
-        ]
-        return (
-            np.stack([strip.lower for strip in strips]),
-            np.stack([strip.upper for strip in strips]),
-        )
-
-    def affine_form(self, strip_b_m: npt.ArrayLike) -> AffineForm:
-        """Return the joint flow zonotope as a shaped affine form."""
-
-        locations = np.asarray(strip_b_m, dtype=float).reshape(-1, 3)
-        zonotope = self.joint_zonotope(locations)
-        return AffineForm.from_zonotope(
-            zonotope,
-            (locations.shape[0] + 1, 3),
-        )
+        joint = self.joint_flow(strip_b_m)
+        hull = joint.independent_hull()
+        lower = hull.lower.reshape(joint.strip_count + 1, 3)
+        upper = hull.upper.reshape(joint.strip_count + 1, 3)
+        return lower[1:], upper[1:]
 
     def joint_zonotope(self, strip_b_m: npt.ArrayLike) -> Zonotope:
-        """Return the stacked centre-and-strip flow zonotope."""
+        """Return the stacked joint-flow zonotope."""
 
-        locations = np.asarray(strip_b_m, dtype=float).reshape(-1, 3)
-        center = Interval(self.center_lower_m_s, self.center_upper_m_s)
-        gradient = Interval(self.gradient_lower_s, self.gradient_upper_s)
-        midpoint_gradient = Interval.point(gradient.center)
-        values = [Interval.point(center.center)]
-        values.extend(
-            Interval.point(center.center) + _gradient_at(midpoint_gradient, location)
-            for location in locations
-        )
-        value = Interval(
-            np.stack([item.lower for item in values]),
-            np.stack([item.upper for item in values]),
-        )
-        strip_count = locations.shape[0]
-        generators = np.zeros(
-            value.lower.shape + (SHARED_FLOW_GENERATOR_COUNT + 3 * strip_count,)
-        )
-        numerical_error = np.array(value.radius, copy=True)
-        for component in range(3):
-            generators[:, component, component] = center.radius[component]
-            for coordinate in range(3):
-                coefficient = (
-                    Interval.point(locations[:, coordinate])
-                    * gradient.radius[component, coordinate]
-                )
-                column = 3 + 3 * coordinate + component
-                generators[1:, component, column] = coefficient.center
-                numerical_error[1:, component] = _add_nonnegative(
-                    numerical_error[1:, component],
-                    coefficient.radius,
-                )
-        remainder_radius = _add_nonnegative(
-            np.broadcast_to(
-                self.remainder_abs_m_s,
-                numerical_error[1:].shape,
-            ),
-            numerical_error[1:],
-        )
-        for strip in range(strip_count):
-            for component in range(3):
-                column = SHARED_FLOW_GENERATOR_COUNT + 3 * strip + component
-                generators[strip + 1, component, column] = remainder_radius[
-                    strip,
-                    component,
-                ]
-        return Zonotope(
-            value.center.reshape(-1),
-            generators.reshape(value.center.size, -1),
-        )
-
-    def contains(self, flow: AffineFlow) -> bool:
-        """Return whether an affine-flow realization is inside the set."""
-
-        center = np.asarray(flow.center_b_m_s, dtype=float).reshape(3)
-        gradient = np.asarray(flow.gradient_b_s, dtype=float).reshape(3, 3)
-        remainder = np.asarray(flow.remainder_b_m_s, dtype=float)
-        return bool(
-            np.all(center >= np.asarray(self.center_lower_m_s))
-            and np.all(center <= np.asarray(self.center_upper_m_s))
-            and np.all(gradient >= np.asarray(self.gradient_lower_s))
-            and np.all(gradient <= np.asarray(self.gradient_upper_s))
-            and np.all(np.abs(remainder) <= np.asarray(self.remainder_abs_m_s))
-        )
-
-
-def _gradient_at(gradient: Interval, location: np.ndarray) -> Interval:
-    components = [gradient[row].dot(location) for row in range(3)]
-    return Interval(
-        np.array([component.lower for component in components]),
-        np.array([component.upper for component in components]),
-    )
-
-
-def _add_nonnegative(first: np.ndarray, second: np.ndarray) -> np.ndarray:
-    total = np.nextafter(first + second, np.inf)
-    return np.where(first == 0.0, second, np.where(second == 0.0, first, total))
+        return self.joint_flow(strip_b_m).zonotope()
 
 
 def _set_array(
@@ -187,7 +285,16 @@ def _set_array(
     shape: tuple[int, ...],
 ) -> None:
     array = np.asarray(value, dtype=float).reshape(shape).copy()
-    if not np.all(np.isfinite(array)):
-        raise ValueError(f"{name} must be finite")
     array.flags.writeable = False
     object.__setattr__(instance, name, array)
+
+
+def _set_matrix(
+    instance: object,
+    name: str,
+    value: npt.ArrayLike,
+    row_count: int,
+) -> None:
+    array = np.asarray(value, dtype=float)
+    column_count = array.shape[1] if array.ndim == 2 else array.size // row_count
+    _set_array(instance, name, array, (row_count, column_count))

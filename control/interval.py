@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
-from flint import arb, ctx
 
 
 def _down(value: npt.ArrayLike) -> np.ndarray:
@@ -23,6 +22,8 @@ def _arb_unary(
     upper: np.ndarray,
     operation: str,
 ) -> tuple[np.ndarray, np.ndarray]:
+    from flint import arb, ctx
+
     lower_result = np.empty(lower.shape)
     upper_result = np.empty(upper.shape)
     with ctx.workprec(128):
@@ -48,6 +49,8 @@ def _arb_atan2(
     x_lower: np.ndarray,
     x_upper: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
+    from flint import arb, ctx
+
     lower_result = np.empty(y_lower.shape)
     upper_result = np.empty(y_upper.shape)
     with ctx.workprec(128):
@@ -157,14 +160,6 @@ class Interval:
         return _new_interval(
             np.minimum(self.lower, other.lower),
             np.maximum(self.upper, other.upper),
-        )
-
-    def intersection(self, other: Interval) -> Interval:
-        """Return the interval intersection, rejecting an empty result."""
-
-        return Interval(
-            np.maximum(self.lower, other.lower),
-            np.minimum(self.upper, other.upper),
         )
 
     def support(self, direction: npt.ArrayLike) -> float:
@@ -493,18 +488,6 @@ class Zonotope:
             )
         return radius
 
-    @property
-    def lower(self) -> np.ndarray:
-        """Return the lower endpoint of the interval hull."""
-
-        return self.interval_hull().lower
-
-    @property
-    def upper(self) -> np.ndarray:
-        """Return the upper endpoint of the interval hull."""
-
-        return self.interval_hull().upper
-
     def interval_hull(self) -> Interval:
         """Return the outward-rounded axis-aligned interval hull."""
 
@@ -520,69 +503,6 @@ class Zonotope:
         for generator in self.generators.T:
             result += Interval.point(generator).dot(vector).abs()
         return float(result.upper)
-
-    def contains(self, point: npt.ArrayLike) -> bool:
-        """Certify point membership with a bounded least-norm solution."""
-
-        value = np.asarray(point, dtype=float).reshape(-1)
-        if value.shape != self.center.shape or not np.all(np.isfinite(value)):
-            return False
-        if not self.interval_hull().contains(value):
-            return False
-        delta = value - self.center
-        if self.generators.shape[1] == 0:
-            return bool(np.array_equal(value, self.center))
-        coefficients = np.linalg.lstsq(
-            self.generators,
-            delta,
-            rcond=None,
-        )[0]
-        residual = self.generators @ coefficients - delta
-        scale = max(
-            1.0,
-            float(np.linalg.norm(delta, ord=np.inf)),
-            float(np.linalg.norm(self.generators, ord=np.inf)),
-        )
-        tolerance = 64.0 * np.finfo(float).eps * scale
-        return bool(
-            np.linalg.norm(residual, ord=np.inf) <= tolerance
-            and np.max(np.abs(coefficients), initial=0.0) <= 1.0 + tolerance
-        )
-
-    def affine_map(
-        self,
-        matrix: npt.ArrayLike,
-        offset: npt.ArrayLike = 0.0,
-    ) -> Zonotope:
-        """Return the zonotope image under a fixed affine map."""
-
-        values = np.asarray(matrix, dtype=float)
-        if values.ndim != 2 or values.shape[1] != self.center.size:
-            raise ValueError("affine map dimension mismatch")
-        center_box = Interval.point(self.center).affine_map(values, offset)
-        mapped = []
-        error = center_box.radius
-        for generator in self.generators.T:
-            image = Interval.point(generator).affine_map(values)
-            mapped.append(image.center)
-            error = _up(error + image.radius)
-        generators = (
-            np.column_stack(mapped) if mapped else np.empty((values.shape[0], 0))
-        )
-        if np.any(error > 0.0):
-            generators = np.column_stack((generators, np.diag(error)))
-        return Zonotope(center_box.center, generators)
-
-    def minkowski(self, other: Zonotope) -> Zonotope:
-        """Return the Minkowski sum of two zonotopes."""
-
-        if self.center.shape != other.center.shape:
-            raise ValueError("zonotope dimension mismatch")
-        center_box = Interval.point(self.center) + other.center
-        generators = np.column_stack((self.generators, other.generators))
-        if np.any(center_box.radius > 0.0):
-            generators = np.column_stack((generators, np.diag(center_box.radius)))
-        return Zonotope(center_box.center, generators)
 
 
 @dataclass(frozen=True)
