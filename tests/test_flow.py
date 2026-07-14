@@ -177,7 +177,7 @@ class FlowTests(TestCase):
             hull.upper.reshape(locations.shape[0] + 1, 3)[1:],
         )
 
-    def test_deterministic_corners_and_adversarial_support(self) -> None:
+    def test_deterministic_factor_patterns_match_zonotope_support(self) -> None:
         """Contain deterministic vertices and attain analytic joint support."""
 
         locations, bounds = _general_flow_bounds()
@@ -211,9 +211,9 @@ class FlowTests(TestCase):
         for direction in directions:
             coefficients = direction @ joint.generators
             factors = np.where(coefficients >= 0.0, 1.0, -1.0)
-            adversarial = joint.evaluate(factors).reshape(-1)
+            realization = joint.evaluate(factors).reshape(-1)
             self.assertAlmostEqual(
-                float(direction @ adversarial),
+                float(direction @ realization),
                 joint.support(direction),
                 places=12,
             )

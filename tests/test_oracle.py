@@ -1,4 +1,4 @@
-"""Offline nonlinear propagation, generation, and falsification tests."""
+"""Offline nonlinear propagation and generation tests."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from control.oracle import (
     OraclePrediction,
     OracleStage,
 )
-from control.predictor import FastPredictor, Prediction, _generate_aircraft
+from control.predictor import _generate_aircraft
 from control.uncertainty import Bounds, FAST_PERIOD_S, PREDICTION_STAGES
 from models.aircraft import Aircraft
 from models.geometry import RigidBodyGeometry
@@ -91,51 +91,6 @@ def _setup() -> tuple[NonlinearOracle, Zonotope, np.ndarray]:
     return NonlinearOracle(generated), belief, queue
 
 
-def _inner(value: Interval, fraction: float = 0.5) -> Interval:
-    return Interval.from_midpoint(value.center, fraction * value.radius)
-
-
-def _fast_geometry(
-    prediction: Prediction,
-    stage: int,
-    reference: np.ndarray,
-    fraction: float = 0.5,
-) -> GeometryEnclosure:
-    def enclosure(
-        center: np.ndarray,
-        coefficient: np.ndarray,
-        radius: np.ndarray,
-    ) -> Interval:
-        value = Interval.from_midpoint(
-            center[stage] + coefficient[stage] @ reference,
-            radius[stage],
-        )
-        return _inner(value, fraction)
-
-    return GeometryEnclosure(
-        enclosure(
-            prediction.body_center,
-            prediction.body_reference,
-            prediction.body_radius,
-        ),
-        enclosure(
-            prediction.contact_center,
-            prediction.contact_reference,
-            prediction.contact_radius,
-        ),
-        enclosure(
-            prediction.footprint_center,
-            prediction.footprint_reference,
-            prediction.footprint_radius,
-        ),
-        enclosure(
-            prediction.contact_velocity_center,
-            prediction.contact_velocity_reference,
-            prediction.contact_velocity_radius,
-        ),
-    )
-
-
 def test_picard_step_contains_simultaneous_corner_and_shared_flow() -> None:
     """Validate an aircraft step with every uncertainty group active."""
 
@@ -154,7 +109,7 @@ def test_picard_step_contains_simultaneous_corner_and_shared_flow() -> None:
         flow[0],
         flow[1:],
     ).interval_hull()
-    factors = np.ones(oracle.factor_count(belief))
+    factors = np.ones(oracle._factor_count(belief))
     realization = oracle._realization(belief, factors)
     concrete_command = oracle.aircraft.clip_control(
         cell.control_anchor
@@ -265,124 +220,6 @@ def test_ten_stage_queue_and_remainder_interfaces(
     assert remainder.numerical_abs.shape == (PREDICTION_STAGES, 15)
     assert np.all(remainder.nonlinear_abs >= 0.0)
     assert np.all(remainder.numerical_abs > 0.0)
-
-
-def test_compare_uses_swept_runtime_geometry() -> None:
-    """Compare continuous oracle sets with predictor geometry arrays."""
-
-    oracle, belief, queue = _setup()
-    cell = oracle.generated.cells[0]
-    reference = cell.control_anchor
-    fast = FastPredictor(oracle.generated).predict(belief, queue, 0)
-    stages = []
-    for stage in range(PREDICTION_STAGES):
-        initial_box = _inner(fast.state_interval(stage, reference, reference))
-        successor_box = _inner(fast.state_interval(stage + 1, reference, reference))
-        initial = Zonotope.from_interval(initial_box)
-        successor = Zonotope.from_interval(successor_box)
-        geometry = _fast_geometry(fast, stage, reference)
-        issued = _inner(
-            Interval.from_midpoint(
-                fast.issued_center[stage] + fast.issued_reference[stage] @ reference,
-                fast.issued_radius[stage],
-            )
-        )
-        applied = _inner(
-            Interval.from_midpoint(
-                fast.applied_center[stage] + fast.applied_reference[stage] @ reference,
-                fast.applied_radius[stage],
-            )
-        )
-        stages.append(
-            OracleStage(
-                initial,
-                successor,
-                initial_box.hull(successor_box),
-                oracle._geometry(successor_box),
-                geometry,
-                issued,
-                applied,
-                (FAST_PERIOD_S,),
-                oracle.joint_flow,
-            )
-        )
-    initial = Zonotope.from_interval(_inner(belief.interval_hull()))
-    nonlinear = OraclePrediction(
-        initial,
-        oracle._geometry(initial.interval_hull()),
-        tuple(stages),
-    )
-    comparison = oracle.compare(fast, nonlinear, reference)
-    assert comparison.valid
-
-    first = stages[0]
-    occupied = first.continuous_geometry.occupied
-    escaped = Interval(occupied.lower + 100.0, occupied.upper + 100.0)
-    bad_geometry = replace(first.continuous_geometry, occupied=escaped)
-    bad = replace(
-        nonlinear,
-        stages=(replace(first, continuous_geometry=bad_geometry), *stages[1:]),
-    )
-    failed = oracle.compare(fast, bad, reference)
-    assert np.min(failed.state_margin) >= 0.0
-    assert failed.occupied_margin[1] < 0.0
-    assert not failed.valid
-
-
-def test_deterministic_corners_rollout_and_adversarial_search(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Run concrete full-horizon corners and deterministic group search."""
-
-    oracle, belief, queue = _setup()
-    cell = oracle.generated.cells[0]
-    corners = oracle.deterministic_corners(belief)
-    assert np.array_equal(corners, oracle.deterministic_corners(belief))
-    assert np.all(np.abs(corners) == 1.0)
-    for factors in corners[:2]:
-        states = oracle.rollout(
-            belief,
-            queue,
-            cell,
-            cell.control_anchor,
-            factors,
-            integration_steps=2,
-        )
-        assert states.shape == (PREDICTION_STAGES + 1, 15)
-        assert np.all(np.isfinite(states))
-
-    fast = FastPredictor(oracle.generated).predict(belief, queue, 0)
-
-    def escaped_rollout(
-        _: Zonotope,
-        __: np.ndarray,
-        ___: object,
-        reference: np.ndarray,
-        factors: np.ndarray,
-        integration_steps: int = 10,
-    ) -> np.ndarray:
-        del integration_steps
-        states = np.stack(
-            [
-                fast.state_center[stage] + fast.state_reference[stage] @ reference
-                for stage in range(PREDICTION_STAGES + 1)
-            ]
-        )
-        del factors
-        return states
-
-    monkeypatch.setattr(oracle, "rollout", escaped_rollout)
-    fast.body_center[:, :, 0] += 10.0
-    result = oracle.falsify(
-        fast,
-        belief,
-        queue,
-        cell,
-        cell.control_anchor,
-        passes=1,
-    )
-    assert result.escaped
-    assert np.all(np.abs(result.factors) <= 1.0)
 
 
 def _landing_prediction(

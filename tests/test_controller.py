@@ -537,6 +537,66 @@ def test_expired_update_deadline_stops_before_prediction(
     assert controller.status == "out_of_envelope"
 
 
+def test_deadline_after_prediction_uses_backup_without_building_rows(
+    generated: GeneratedAircraft,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup = np.array((0.01, -0.01, 0.005))
+    mission = _mission(generated)
+    controller = _activate(
+        generated,
+        mission,
+        _certificate(generated, backup=backup, mission=mission),
+    )
+    checks = iter((False, True))
+    monkeypatch.setattr(
+        "control.governor._deadline_reached",
+        lambda _: next(checks),
+    )
+
+    def fail(*_: object, **__: object) -> None:
+        raise AssertionError("rows were built after the optimization deadline")
+
+    monkeypatch.setattr(controller._constraint_builder, "rows", fail)
+    command = controller.command(
+        generated.cells[0].anchor,
+        np.full(3, 0.1),
+        perf_counter() + 1.0,
+    )
+    assert command is not None
+    np.testing.assert_array_equal(controller.current_reference, backup)
+
+
+def test_deadline_after_rows_uses_backup_without_solving(
+    generated: GeneratedAircraft,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup = np.array((0.01, -0.01, 0.005))
+    mission = _mission(generated)
+    controller = _activate(
+        generated,
+        mission,
+        _certificate(generated, backup=backup, mission=mission),
+    )
+    checks = iter((False, False, True))
+    monkeypatch.setattr(
+        "control.governor._deadline_reached",
+        lambda _: next(checks),
+    )
+
+    def fail(*_: object, **__: object) -> None:
+        raise AssertionError("solver ran after the optimization deadline")
+
+    monkeypatch.setattr(controller._solver, "solve_into", fail)
+    command = controller.command(
+        generated.cells[0].anchor,
+        np.full(3, 0.1),
+        perf_counter() + 1.0,
+    )
+    assert command is not None
+    np.testing.assert_array_equal(controller.current_reference, backup)
+
+
 def test_infeasible_online_set_uses_the_compiled_backup(
     generated: GeneratedAircraft,
     monkeypatch: pytest.MonkeyPatch,

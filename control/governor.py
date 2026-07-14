@@ -575,40 +575,41 @@ class JointFlowCaptureGovernor:
             self.issued_queue,
             simplex.gain_index,
         )
-        matrix, bounds = self._constraint_builder.rows(
-            self._predictor.prediction,
-            self.certificate.beta,
-            simplex.progress_m,
-            simplex.terminal,
-        )
-        if matrix.shape[0] != simplex.constraint_count:
-            self.status = "out_of_envelope"
-            return False
-        status = self._solver.solve_into(
-            nominal_reference,
-            self.current_reference,
-            matrix,
-            bounds,
-            self._governor_reference,
-            self._backup_reference,
-            deadline,
-        )
-        if status == _SOLVED:
-            if not _reference_feasible(
-                self._governor_reference,
-                matrix,
-                bounds,
-                self.certificate.reference_lower,
-                self.certificate.reference_upper,
-            ):
+        reference = self._backup_reference
+        if not _deadline_reached(deadline):
+            matrix, bounds = self._constraint_builder.rows(
+                self._predictor.prediction,
+                self.certificate.beta,
+                simplex.progress_m,
+                simplex.terminal,
+            )
+            if matrix.shape[0] != simplex.constraint_count:
                 self.status = "out_of_envelope"
                 return False
-            reference = self._governor_reference
-        elif status in (_TIMED_OUT, _INFEASIBLE):
-            reference = self._backup_reference
-        else:
-            self.status = "out_of_envelope"
-            return False
+            if not _deadline_reached(deadline):
+                status = self._solver.solve_into(
+                    nominal_reference,
+                    self.current_reference,
+                    matrix,
+                    bounds,
+                    self._governor_reference,
+                    self._backup_reference,
+                    deadline,
+                )
+                if status == _SOLVED:
+                    if not _reference_feasible(
+                        self._governor_reference,
+                        matrix,
+                        bounds,
+                        self.certificate.reference_lower,
+                        self.certificate.reference_upper,
+                    ):
+                        self.status = "out_of_envelope"
+                        return False
+                    reference = self._governor_reference
+                elif status not in (_TIMED_OUT, _INFEASIBLE):
+                    self.status = "out_of_envelope"
+                    return False
 
         self.current_reference[:] = reference
         self.gain_index = simplex.gain_index

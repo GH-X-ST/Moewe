@@ -195,7 +195,7 @@ class GovernorSolverTests(TestCase):
         self.assertLessEqual(clock.resolution, 1.0e-3)
 
     def test_large_deterministic_set_matches_scipy(self) -> None:
-        """Match a trusted convex solver over publication-scale QP variation."""
+        """Match a trusted convex solver over representative QP variation."""
 
         rng = np.random.default_rng(20260713)
         lower = np.array([-0.4, -2.0, 10.0])

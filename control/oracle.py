@@ -1,10 +1,10 @@
-"""Offline validated propagation and falsification for generated predictors."""
+"""Offline validated propagation for generated predictors."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
-from math import ceil, log2, pi, radians
+from math import pi, radians
 from typing import TypedDict, cast
 
 import numpy as np
@@ -26,7 +26,7 @@ from control.predictor import (
 )
 from control.uncertainty import Bounds, FAST_PERIOD_S, PREDICTION_STAGES
 from models.aircraft import G_M_S2, SMOOTH_ABS_EPS, Aircraft, flat_plate_coefficients
-from models.geometry import RigidBodyGeometry, point_velocities, world_points
+from models.geometry import RigidBodyGeometry
 
 NUMERICAL_TOLERANCE = 64.0 * np.finfo(float).eps
 
@@ -166,79 +166,6 @@ class RemainderBounds:
             np.all(self.nonlinear_abs <= bounds.nonlinear_remainder_abs)
             and np.all(self.numerical_abs <= bounds.numerical_remainder_abs)
         )
-
-
-@dataclass(frozen=True)
-class Containment:
-    """Minimum predictor margins over all oracle state and geometry sets."""
-
-    state_margin: npt.ArrayLike
-    occupied_margin: npt.ArrayLike
-    contact_margin: npt.ArrayLike
-    footprint_margin: npt.ArrayLike
-    contact_velocity_margin: npt.ArrayLike
-    issued_margin: npt.ArrayLike
-    applied_margin: npt.ArrayLike
-
-    def __post_init__(self) -> None:
-        fields = (
-            ("state_margin", PREDICTION_STAGES + 1),
-            ("occupied_margin", PREDICTION_STAGES + 1),
-            ("contact_margin", PREDICTION_STAGES + 1),
-            ("footprint_margin", PREDICTION_STAGES + 1),
-            ("contact_velocity_margin", PREDICTION_STAGES + 1),
-            ("issued_margin", PREDICTION_STAGES),
-            ("applied_margin", PREDICTION_STAGES),
-        )
-        for name, size in fields:
-            _set_array(self, name, getattr(self, name), (size,))
-
-    @property
-    def valid(self) -> bool:
-        """Return whether every reported set is contained."""
-
-        return all(
-            np.min(getattr(self, name)) >= 0.0
-            for name in (
-                "state_margin",
-                "occupied_margin",
-                "contact_margin",
-                "footprint_margin",
-                "contact_velocity_margin",
-                "issued_margin",
-                "applied_margin",
-            )
-        )
-
-
-@dataclass(frozen=True)
-class Falsification:
-    """Best normalized uncertainty realization found by deterministic search."""
-
-    factors: npt.ArrayLike
-    escape: float
-    states: npt.ArrayLike
-
-    def __post_init__(self) -> None:
-        factors = np.asarray(self.factors, dtype=float).reshape(-1).copy()
-        states = (
-            np.asarray(self.states, dtype=float)
-            .reshape(
-                PREDICTION_STAGES + 1,
-                15,
-            )
-            .copy()
-        )
-        factors.flags.writeable = False
-        states.flags.writeable = False
-        object.__setattr__(self, "factors", factors)
-        object.__setattr__(self, "states", states)
-
-    @property
-    def escaped(self) -> bool:
-        """Return whether the realization left a predictor enclosure."""
-
-        return self.escape > 0.0
 
 
 @dataclass
@@ -389,90 +316,6 @@ class NonlinearOracle:
             )
         return RemainderBounds(nonlinear, numerical)
 
-    def compare(
-        self,
-        fast: Prediction,
-        nonlinear: OraclePrediction,
-        reference: npt.ArrayLike,
-    ) -> Containment:
-        """Compare all ten predictor stages with nonlinear oracle sets."""
-
-        value = np.asarray(reference, dtype=float).reshape(3)
-        state_margin = np.empty(PREDICTION_STAGES + 1)
-        occupied_margin = np.empty_like(state_margin)
-        contact_margin = np.empty_like(state_margin)
-        footprint_margin = np.empty_like(state_margin)
-        velocity_margin = np.empty_like(state_margin)
-        for stage in range(PREDICTION_STAGES + 1):
-            predicted_state = fast.state_interval(stage, value, value)
-            oracle_state = nonlinear.state_interval(stage)
-            state_margin[stage] = _margin(oracle_state, predicted_state)
-        predicted_geometry = self._geometry(fast.state_interval(0, value, value))
-        oracle_geometry = nonlinear.initial_geometry
-        occupied_margin[0] = _margin(
-            oracle_geometry.occupied,
-            predicted_geometry.occupied,
-        )
-        contact_margin[0] = _margin(
-            oracle_geometry.contact,
-            predicted_geometry.contact,
-        )
-        footprint_margin[0] = _margin(
-            oracle_geometry.footprint,
-            predicted_geometry.footprint,
-        )
-        velocity_margin[0] = _margin(
-            oracle_geometry.contact_velocity,
-            predicted_geometry.contact_velocity,
-        )
-        for index, oracle_stage in enumerate(nonlinear.stages):
-            predicted_geometry = _prediction_geometry(fast, index, value)
-            oracle_geometry = oracle_stage.continuous_geometry
-            occupied_margin[index + 1] = _margin(
-                oracle_geometry.occupied,
-                predicted_geometry.occupied,
-            )
-            contact_margin[index + 1] = _margin(
-                oracle_geometry.contact,
-                predicted_geometry.contact,
-            )
-            footprint_margin[index + 1] = _margin(
-                oracle_geometry.footprint,
-                predicted_geometry.footprint,
-            )
-            velocity_margin[index + 1] = _margin(
-                oracle_geometry.contact_velocity,
-                predicted_geometry.contact_velocity,
-            )
-        issued_margin = np.empty(PREDICTION_STAGES)
-        applied_margin = np.empty(PREDICTION_STAGES)
-        for index, oracle_stage in enumerate(nonlinear.stages):
-            predicted_issued = Interval.from_midpoint(
-                fast.issued_center[index] + fast.issued_reference[index] @ value,
-                fast.issued_radius[index],
-            )
-            predicted_applied = Interval.from_midpoint(
-                fast.applied_center[index] + fast.applied_reference[index] @ value,
-                fast.applied_radius[index],
-            )
-            issued_margin[index] = _margin(
-                oracle_stage.issued_command,
-                predicted_issued,
-            )
-            applied_margin[index] = _margin(
-                oracle_stage.applied_command,
-                predicted_applied,
-            )
-        return Containment(
-            state_margin,
-            occupied_margin,
-            contact_margin,
-            footprint_margin,
-            velocity_margin,
-            issued_margin,
-            applied_margin,
-        )
-
     def certify_fast_prediction(
         self,
         initial: Zonotope,
@@ -529,185 +372,12 @@ class NonlinearOracle:
             for index, stage in enumerate(prediction.stages[:-1])
         )
 
-    def factor_count(self, initial: Zonotope) -> int:
-        """Return the normalized factor count used by concrete rollouts."""
-
+    def _factor_count(self, initial: Zonotope) -> int:
         state_count = initial.generators.shape[1]
         queue_count = self.bounds.queue_length * 3
         flow_count = PREDICTION_STAGES * self._flow.generators.shape[1]
         measurement_count = PREDICTION_STAGES * 18
         return state_count + queue_count + flow_count + 24 + measurement_count + 1
-
-    def deterministic_corners(self, initial: Zonotope) -> np.ndarray:
-        """Return scalable deterministic full-factor extreme patterns."""
-
-        dimension = self.factor_count(initial)
-        columns: np.ndarray = np.arange(dimension, dtype=np.uint64)
-        patterns = [
-            -np.ones(dimension),
-            np.ones(dimension),
-        ]
-        for bit in range(max(1, ceil(log2(dimension)))):
-            pattern = np.where((columns >> bit) & 1, 1.0, -1.0)
-            patterns.extend((pattern, -pattern))
-        return np.unique(np.asarray(patterns), axis=0)
-
-    def rollout(
-        self,
-        initial: Zonotope,
-        issued_queue: npt.ArrayLike | tuple[Interval, ...],
-        cell: GainCell,
-        reference: npt.ArrayLike,
-        factors: npt.ArrayLike,
-        integration_steps: int = 10,
-    ) -> np.ndarray:
-        """Return one dense deterministic nonlinear uncertainty realization."""
-
-        values = np.asarray(factors, dtype=float).reshape(self.factor_count(initial))
-        realization = self._realization(initial, values)
-        state = realization["state"]
-        queue_factors = np.asarray(realization["queue_factors"])
-        queue_boxes = self._command_queue(issued_queue)
-        queue_centers = np.stack([command.center for command in queue_boxes])
-        queue_radii = np.stack([command.radius for command in queue_boxes])
-        cell_index = next(
-            index
-            for index, generated_cell in enumerate(self.generated.cells)
-            if generated_cell is cell
-        )
-        fast = FastPredictor(self.generated).predict(
-            initial,
-            queue_centers,
-            cell_index,
-            issued_queue_radius=queue_radii,
-        )
-        reference_value = np.asarray(reference, dtype=float).reshape(3)
-        nominal_states = fast.state_center + fast.state_reference @ reference_value
-        queue = [
-            self.aircraft.clip_control(
-                command.center
-                + queue_factors[index]
-                * (command.radius + self.bounds.command_error_abs_rad)
-            )
-            for index, command in enumerate(queue_boxes)
-        ]
-        states = [state.copy()]
-        for stage in range(PREDICTION_STAGES):
-            measurement = realization["measurement"][stage]
-            command_error = realization["command_error"][stage]
-            issued = self.aircraft.clip_control(
-                reference_value
-                + cell.gain @ (state + measurement - nominal_states[stage])
-                + command_error
-            )
-            queue.append(issued)
-            age = realization["delay_age"]
-            applied = queue[len(queue) - 1 - age]
-            flow = realization["flows"][stage]
-            step_s = FAST_PERIOD_S / integration_steps
-
-            def derivative(value: np.ndarray) -> np.ndarray:
-                return self._concrete_derivative(
-                    value,
-                    applied,
-                    flow,
-                    realization,
-                )
-
-            for _ in range(integration_steps):
-                k1 = derivative(state)
-                k2 = derivative(state + 0.5 * step_s * k1)
-                k3 = derivative(state + 0.5 * step_s * k2)
-                k4 = derivative(state + step_s * k3)
-                state = state + step_s * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
-            states.append(state.copy())
-        return np.asarray(states)
-
-    def falsify(
-        self,
-        fast: Prediction,
-        initial: Zonotope,
-        issued_queue: npt.ArrayLike | tuple[Interval, ...],
-        cell: GainCell,
-        reference: npt.ArrayLike,
-        passes: int = 2,
-    ) -> Falsification:
-        """Maximize predictor escape over deterministic uncertainty groups."""
-
-        reference_value = np.asarray(reference, dtype=float).reshape(3)
-        intervals = tuple(
-            fast.state_interval(stage, reference_value, reference_value)
-            for stage in range(PREDICTION_STAGES + 1)
-        )
-
-        def evaluate(factors: np.ndarray) -> tuple[float, np.ndarray]:
-            states = self.rollout(
-                initial,
-                issued_queue,
-                cell,
-                reference,
-                factors,
-            )
-            escape = -np.inf
-            for stage, state in enumerate(states):
-                interval = intervals[stage]
-                scaled = (
-                    np.maximum(
-                        state - interval.upper,
-                        interval.lower - state,
-                    )
-                    / self.generated.state_scale
-                )
-                escape = max(escape, float(np.max(scaled)))
-                geometry = (
-                    self._geometry(interval)
-                    if stage == 0
-                    else _prediction_geometry(fast, stage - 1, reference_value)
-                )
-                escape = max(
-                    escape,
-                    _point_escape(
-                        world_points(state, self.generated.geometry.body_b_m),
-                        geometry.occupied,
-                    ),
-                    _point_escape(
-                        world_points(state, self.generated.geometry.contact_b_m),
-                        geometry.contact,
-                    ),
-                    _point_escape(
-                        world_points(state, self.generated.geometry.footprint_b_m),
-                        geometry.footprint,
-                    ),
-                    _point_escape(
-                        point_velocities(
-                            state,
-                            self.generated.geometry.contact_b_m,
-                        ),
-                        geometry.contact_velocity,
-                    ),
-                )
-            return escape, states
-
-        corners = self.deterministic_corners(initial)
-        best_factors = corners[0].copy()
-        best_escape, best_states = evaluate(best_factors)
-        for factors in corners[1:]:
-            escape, states = evaluate(factors)
-            if escape > best_escape:
-                best_factors = factors.copy()
-                best_escape = escape
-                best_states = states
-        for _ in range(passes):
-            for group in self._factor_groups(initial):
-                for sign in (-1.0, 1.0):
-                    candidate = best_factors.copy()
-                    candidate[group] = sign
-                    escape, states = evaluate(candidate)
-                    if escape > best_escape:
-                        best_factors = candidate
-                        best_escape = escape
-                        best_states = states
-        return Falsification(best_factors, best_escape, best_states)
 
     def _command_queue(
         self,
@@ -1364,31 +1034,6 @@ class NonlinearOracle:
             (position_dot, euler_dot, velocity_dot, angular_dot, surface_dot)
         )
 
-    def _factor_groups(self, initial: Zonotope) -> tuple[slice, ...]:
-        groups = []
-        cursor = 0
-        state_count = initial.generators.shape[1]
-        groups.append(slice(cursor, cursor + state_count))
-        cursor += state_count
-        for _ in range(self.bounds.queue_length):
-            groups.append(slice(cursor, cursor + 3))
-            cursor += 3
-        flow_count = self._flow.generators.shape[1]
-        for _ in range(PREDICTION_STAGES):
-            groups.append(slice(cursor, cursor + flow_count))
-            cursor += flow_count
-        sizes = (1, 1, 1, 3, 3, 3, 9, 3)
-        for size in sizes:
-            groups.append(slice(cursor, cursor + size))
-            cursor += size
-        for _ in range(PREDICTION_STAGES):
-            groups.append(slice(cursor, cursor + 15))
-            cursor += 15
-            groups.append(slice(cursor, cursor + 3))
-            cursor += 3
-        groups.append(slice(cursor, cursor + 1))
-        return tuple(groups)
-
 
 def _verify_gain_cell(
     generated: _AircraftModel,
@@ -1983,26 +1628,6 @@ def _roundoff_bound(
     return np.nextafter(error, np.inf)
 
 
-def _margin(inner: Interval, outer: Interval) -> float:
-    return float(
-        min(
-            np.min(inner.lower - outer.lower),
-            np.min(outer.upper - inner.upper),
-        )
-    )
-
-
-def _point_escape(points: np.ndarray, enclosure: Interval) -> float:
-    return float(
-        np.max(
-            np.maximum(
-                points - enclosure.upper,
-                enclosure.lower - points,
-            )
-        )
-    )
-
-
 def _plane_height(
     points: Interval,
     center: np.ndarray,
@@ -2030,45 +1655,6 @@ def _prediction_state(
     return Zonotope(
         center,
         np.column_stack((generators, reference_generators)),
-    )
-
-
-def _prediction_geometry(
-    prediction: Prediction,
-    stage: int,
-    reference: np.ndarray,
-) -> GeometryEnclosure:
-    def enclosure(
-        center: np.ndarray,
-        coefficient: np.ndarray,
-        radius: np.ndarray,
-    ) -> Interval:
-        return Interval.from_midpoint(
-            center[stage] + coefficient[stage] @ reference,
-            radius[stage],
-        )
-
-    return GeometryEnclosure(
-        enclosure(
-            prediction.body_center,
-            prediction.body_reference,
-            prediction.body_radius,
-        ),
-        enclosure(
-            prediction.contact_center,
-            prediction.contact_reference,
-            prediction.contact_radius,
-        ),
-        enclosure(
-            prediction.footprint_center,
-            prediction.footprint_reference,
-            prediction.footprint_radius,
-        ),
-        enclosure(
-            prediction.contact_velocity_center,
-            prediction.contact_velocity_reference,
-            prediction.contact_velocity_radius,
-        ),
     )
 
 

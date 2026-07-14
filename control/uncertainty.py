@@ -46,6 +46,10 @@ class Bounds:
     body_rate_abs_max_rad_s: float
 
     def __post_init__(self) -> None:
+        if PREDICTION_PERIOD_S < GOVERNOR_PERIOD_S + self.command_delay_s[1]:
+            raise ValueError(
+                "prediction horizon must cover the governor period and command delay"
+            )
         arrays = (
             ("force_residual_abs_n", (3,)),
             ("moment_residual_abs_n_m", (3,)),

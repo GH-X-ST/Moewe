@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -120,6 +122,13 @@ def test_nominal_model_dimensions_and_periods() -> None:
     )
     assert np.all(cell.gain[:, :3] == 0.0)
     assert np.all(cell.gain[:, 5] == 0.0)
+
+
+def test_prediction_horizon_covers_governor_period_and_delay() -> None:
+    bounds = _bounds(Aircraft())
+    assert PREDICTION_PERIOD_S >= GOVERNOR_PERIOD_S + bounds.command_delay_s[1]
+    with pytest.raises(ValueError, match="prediction horizon"):
+        replace(bounds, command_delay_s=(0.0, 0.101))
 
 
 def test_analytic_rotation_derivatives_match_central_differences() -> None:
