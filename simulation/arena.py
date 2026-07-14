@@ -37,7 +37,7 @@ DEFAULT_ARENA_CONFIG = ArenaConfig()
 
 @dataclass
 class Arena:
-    """Arena plug-in exposing tracker and safety-volume checks."""
+    """Tracker and safety-volume checks for the flight arena."""
 
     config: ArenaConfig = DEFAULT_ARENA_CONFIG
 
@@ -50,12 +50,6 @@ class Arena:
         """Return whether the point lies inside the true safe volume."""
 
         return _contains(point_w_up_m, self.config.true_safe_bounds_m)
-
-
-def build_arena(config: ArenaConfig = DEFAULT_ARENA_CONFIG) -> Arena:
-    """Build a reusable arena plug-in instance."""
-
-    return Arena(config)
 
 
 def _contains(point_w_up_m: Point3D, bounds_m: Bounds3D) -> bool:

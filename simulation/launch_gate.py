@@ -37,7 +37,7 @@ LAUNCH_BODY_RATE_BOUNDS_RAD_S: Bounds3D = (
 
 @dataclass(frozen=True)
 class LaunchGate:
-    """Launch gate plug-in for release-state checks."""
+    """Release-state checks at the launch gate."""
 
     position_bounds_m: Bounds3D = LAUNCH_POSITION_BOUNDS_M
     attitude_bounds_rad: Bounds3D = LAUNCH_ATTITUDE_BOUNDS_RAD
