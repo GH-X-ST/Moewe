@@ -25,7 +25,7 @@ DEFAULT_PROFILE_PARAMETERS = (
 
 @dataclass(frozen=True)
 class UpdraftConfig:
-    """Height profile and overlap closure for an updraft plug-in."""
+    """Height profile and overlap closure for an updraft model."""
 
     z_axis_m: npt.ArrayLike
     parameters: npt.ArrayLike
@@ -52,7 +52,7 @@ def annular_gaussian(
     radius = np.asarray(radius_m, dtype=float)
     delta = np.asarray(delta_r_m, dtype=float)
     return np.asarray(a_ring_m_s, dtype=float) * np.exp(
-        -((radius - np.asarray(r_ring_m, dtype=float)) / delta) ** 2
+        -(((radius - np.asarray(r_ring_m, dtype=float)) / delta) ** 2)
     )
 
 
@@ -74,9 +74,7 @@ class AnnularGaussianUpdraft:
         if self.source_xy_m.ndim != 2 or self.source_xy_m.shape[1] != 2:
             raise ValueError("source_xy_m must have shape (n_sources, 2).")
         if self.z_axis_m.ndim != 1 or self.z_axis_m.size == 0:
-            raise ValueError(
-                "z_axis_m must be a non-empty one-dimensional axis."
-            )
+            raise ValueError("z_axis_m must be a non-empty one-dimensional axis.")
         if np.any(np.diff(self.z_axis_m) <= 0.0):
             raise ValueError("z_axis_m must be strictly increasing.")
 
@@ -101,9 +99,7 @@ class AnnularGaussianUpdraft:
                 dtype=float,
             )
             if self.source_strengths.shape != (n_sources,):
-                raise ValueError(
-                    f"source_strengths must have shape ({n_sources},)."
-                )
+                raise ValueError(f"source_strengths must have shape ({n_sources},).")
 
     def __call__(self, points_w_up_m: npt.ArrayLike) -> np.ndarray:
         """Return wind vectors in public z-up world coordinates."""
@@ -182,17 +178,3 @@ class AnnularGaussianUpdraft:
             source_square_sum[active] + float(self.overlap_epsilon)
         )
         return source_sum / np.maximum(n_eff, 1.0) ** beta
-
-
-def build_updraft(
-    source_xy_m: npt.ArrayLike,
-    source_strengths: npt.ArrayLike | None = None,
-    config: UpdraftConfig | None = None,
-) -> AnnularGaussianUpdraft:
-    """Build a reusable updraft plug-in instance."""
-
-    return AnnularGaussianUpdraft(
-        source_xy_m=source_xy_m,
-        source_strengths=source_strengths,
-        config=default_updraft_config() if config is None else config,
-    )
