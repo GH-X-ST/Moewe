@@ -10,6 +10,7 @@ import numpy.typing as npt
 
 from control.flow import FlowBounds
 
+OBSERVER_PERIOD_S = 0.005
 FAST_PERIOD_S = 0.020
 GOVERNOR_PERIOD_S = 0.100
 PREDICTION_PERIOD_S = 0.200

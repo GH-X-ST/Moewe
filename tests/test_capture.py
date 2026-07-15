@@ -55,6 +55,8 @@ class _Prediction:
         self.state_generators[:, :, : belief.generators.shape[1]] = belief.generators
         self.generator_count = np.full(stages, count)
         self.body_count = 1
+        self.flow_center = np.zeros(3)
+        self.flow_radius = np.zeros(3)
         direction = -1.0 if approaching else 1.0
         for stage in range(stages):
             fraction = stage / 5.0
@@ -84,6 +86,18 @@ class _Prediction:
         del stage
         row = np.asarray(direction, dtype=float)
         return 0.0, row.copy()
+
+    def air_velocity_support(
+        self,
+        stage: int,
+        direction: np.ndarray,
+    ) -> tuple[float, np.ndarray]:
+        row = np.zeros(15)
+        row[6:9] = direction
+        offset, reference = self.state_support(stage, row)
+        offset -= float(direction @ self.flow_center)
+        offset += float(np.abs(direction) @ self.flow_radius)
+        return offset, reference
 
     def applied_support(
         self,
@@ -416,6 +430,15 @@ def test_uniform_cell_backups_are_feasible_everywhere() -> None:
                 simplex.progress_m,
                 simplex.terminal,
             )
+            if simplex.terminal:
+                matrix = np.vstack((matrix, np.eye(3), -np.eye(3)))
+                bounds = np.concatenate(
+                    (
+                        bounds,
+                        simplex.reference_upper,
+                        -simplex.reference_lower,
+                    )
+                )
             reference = simplex.backup()
             assert simplex.constraint_count == matrix.shape[0]
             np.testing.assert_array_equal(simplex.backup_reference, reference)
@@ -505,6 +528,8 @@ def test_degenerate_domains_and_simplices_are_rejected() -> None:
             0,
             0.1,
             False,
+            -np.ones(3),
+            np.ones(3),
         )
 
     vertices = np.vstack((np.zeros(3), np.eye(3)))
@@ -516,6 +541,8 @@ def test_degenerate_domains_and_simplices_are_rejected() -> None:
             0,
             0.1,
             False,
+            -np.ones(3),
+            np.ones(3),
         )
 
 
@@ -554,26 +581,25 @@ def test_public_compiler_requires_a_verified_aircraft_core() -> None:
         compile_capture(generated, predictor, mission)
 
 
-def test_hard_airspeed_and_alpha_rows_include_cg_flow() -> None:
-    import control.capture as capture
+def test_air_velocity_support_uses_current_center_flow() -> None:
+    generated, predictor, _ = _fixture()
+    belief = SimpleNamespace(
+        center=generated.domain.center,
+        generators=np.empty((15, 0)),
+    )
+    prediction = predictor.predict(
+        belief,
+        np.zeros((1, 3)),
+        0,
+        np.zeros((1, 3)),
+    )
+    prediction.flow_center[:] = (1.5, 0.0, 0.3)
+    prediction.flow_radius[:] = (0.5, 0.5, 0.1)
 
-    generated, _, _ = _fixture()
-    generated.bounds.flow = FlowBounds(
-        (1.0, -0.5, 0.2),
-        (2.0, 0.5, 0.4),
-        np.zeros((3, 3)),
-        np.zeros((3, 3)),
-        np.zeros(3),
+    offset, _ = prediction.air_velocity_support(1, np.array((-1.0, 0.0, 0.0)))
+
+    state_offset, _ = prediction.state_support(
+        1,
+        np.array((0.0,) * 6 + (-1.0, 0.0, 0.0) + (0.0,) * 6),
     )
-    matrix, limits = capture._hard_halfspaces(generated)
-    direction = matrix[4, 6:9]
-    flow = generated.bounds.flow.joint_zonotope(
-        generated.aircraft.strip_table.r_b_m
-    ).interval_hull()
-    flow_support = float(
-        (-direction) @ flow.center[:3] + np.abs(direction) @ flow.radius[:3]
-    )
-    assert limits[4] == pytest.approx(generated.bounds.airspeed_m_s[1] - flow_support)
-    assert limits[12] == pytest.approx(
-        -generated.bounds.airspeed_m_s[0] - flow.upper[0]
-    )
+    assert offset == pytest.approx(state_offset + 2.0)

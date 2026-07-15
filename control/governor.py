@@ -13,6 +13,7 @@ from control.capture import (
     CaptureCertificate,
     CaptureConstraintBuilder,
 )
+from control.observer import StateFlowEstimate
 from control.predictor import FastPredictor, GeneratedAircraft
 from control.uncertainty import NEXT_UPDATE_STAGE, PREDICTION_STAGES
 
@@ -25,12 +26,6 @@ _INFEASIBLE = -1
 _TIMED_OUT = 0
 _SOLVED = 1
 _CONTINUE = 2
-
-
-class _StateBelief:
-    def __init__(self, estimation_abs: np.ndarray) -> None:
-        self.center = np.empty(15)
-        self.generators = np.diag(estimation_abs)
 
 
 class GovernorSolver:
@@ -323,15 +318,16 @@ class JointFlowCaptureGovernor:
         self.gain_index = -1
         self.issued_queue = np.empty((generated.bounds.queue_length, 3))
         self._issued_flat = self.issued_queue.reshape(-1)
-        self.latest_belief = _StateBelief(generated.bounds.state_estimation_abs)
         self._predictor = FastPredictor(generated)
         self._stage = NEXT_UPDATE_STAGE
         self._terminal_cell = False
+        self._last_estimate_timestamp_s = -np.inf
         self._measured_segment = np.empty((2, 15))
         self._augmented_center = np.empty(15 + 3 * generated.bounds.queue_length)
         self._augmented_normalized = np.empty(self._augmented_center.size)
         self._state_lower = np.empty(15)
         self._state_upper = np.empty(15)
+        self._belief_radius = np.empty(15)
         self._prediction_lower = np.empty(15)
         self._prediction_upper = np.empty(15)
         self._nominal_state = np.empty(15)
@@ -351,25 +347,25 @@ class JointFlowCaptureGovernor:
     def activate(
         self,
         certificate: CaptureCertificate,
-        state: npt.ArrayLike,
+        estimate: StateFlowEstimate,
         reference: npt.ArrayLike,
         issued_queue: npt.ArrayLike,
     ) -> None:
-        """Activate one compiled mission from its measured command history."""
+        """Activate one compiled mission from a containing observer set."""
 
         if certificate.generated is not self._predictor.generated:
             raise ValueError("capture certificate belongs to another aircraft core")
-        measurement = np.asarray(state, dtype=float).reshape(15)
+        measurement = estimate.state.center
         self.mission = certificate.mission
         self.certificate = certificate
         self.current_reference[:] = np.asarray(reference, dtype=float).reshape(3)
         self.issued_queue[:] = np.asarray(issued_queue, dtype=float).reshape(
             self.issued_queue.shape
         )
-        self.latest_belief.center[:] = measurement
         self.gain_index = -1
         self._stage = NEXT_UPDATE_STAGE
         self._terminal_cell = False
+        self._last_estimate_timestamp_s = -np.inf
         self._measured_segment[0] = measurement
         self._normalized_coordinates = np.empty(certificate.coordinate_offset.size)
         self._simplex_weights = np.empty(certificate.coordinate_offset.size + 1)
@@ -387,14 +383,15 @@ class JointFlowCaptureGovernor:
         )
         self.status = (
             "active"
-            if np.all(self.issued_queue >= self._issued_lower)
+            if self._valid_estimate(estimate)
+            and np.all(self.issued_queue >= self._issued_lower)
             and np.all(self.issued_queue <= self._issued_upper)
             else "out_of_envelope"
         )
 
     def command(
         self,
-        state: npt.ArrayLike,
+        estimate: StateFlowEstimate,
         nominal_reference: npt.ArrayLike,
         deadline: float,
     ) -> np.ndarray | None:
@@ -402,11 +399,18 @@ class JointFlowCaptureGovernor:
 
         if self.status != "active":
             raise RuntimeError("capture governor is not active")
-        measurement = np.asarray(state, dtype=float).reshape(15)
+        if (
+            estimate.timestamp_s <= self._last_estimate_timestamp_s
+            or not self._valid_estimate(estimate)
+        ):
+            self.status = "out_of_envelope"
+            return None
+        self._last_estimate_timestamp_s = estimate.timestamp_s
+        measurement = estimate.state.center
         event_checked = False
 
         if self._terminal_cell and self._stage == PREDICTION_STAGES:
-            if not self._inside_prediction(measurement, self._stage):
+            if not self._inside_prediction(estimate, self._stage):
                 self.status = "out_of_envelope"
                 return None
             if self._terminal(measurement):
@@ -416,18 +420,18 @@ class JointFlowCaptureGovernor:
 
         if self._stage == NEXT_UPDATE_STAGE and not self._terminal_cell:
             if self.gain_index >= 0:
-                if not self._inside_prediction(measurement, self._stage):
+                if not self._inside_prediction(estimate, self._stage):
                     self.status = "out_of_envelope"
                     return None
                 if self._terminal(measurement):
                     return None
                 event_checked = True
-            if not self._update(measurement, nominal_reference, deadline):
+            if not self._update(estimate, nominal_reference, deadline):
                 return None
             self._stage = 0
             event_checked = True
 
-        if not self._inside_prediction(measurement, self._stage):
+        if not self._inside_prediction(estimate, self._stage):
             self.status = "out_of_envelope"
             return None
         if not event_checked and self._terminal(measurement):
@@ -470,7 +474,7 @@ class JointFlowCaptureGovernor:
         self._stage += 1
         return self._command
 
-    def _inside_prediction(self, measurement: np.ndarray, stage: int) -> bool:
+    def _inside_prediction(self, estimate: StateFlowEstimate, stage: int) -> bool:
         prediction = self._predictor.prediction
         np.matmul(
             prediction.state_reference[stage],
@@ -488,16 +492,7 @@ class JointFlowCaptureGovernor:
             prediction.state_radius[stage],
             out=self._prediction_upper,
         )
-        np.subtract(
-            measurement,
-            self._predictor.generated.bounds.state_estimation_abs,
-            out=self._state_lower,
-        )
-        np.add(
-            measurement,
-            self._predictor.generated.bounds.state_estimation_abs,
-            out=self._state_upper,
-        )
+        self._belief_bounds(estimate)
         for index in range(15):
             if (
                 self._state_lower[index] < self._prediction_lower[index]
@@ -522,21 +517,12 @@ class JointFlowCaptureGovernor:
 
     def _update(
         self,
-        state: np.ndarray,
+        estimate: StateFlowEstimate,
         nominal_reference: npt.ArrayLike,
         deadline: float,
     ) -> bool:
-        self.latest_belief.center[:] = state
-        np.subtract(
-            self.latest_belief.center,
-            self._predictor.generated.bounds.state_estimation_abs,
-            out=self._state_lower,
-        )
-        np.add(
-            self.latest_belief.center,
-            self._predictor.generated.bounds.state_estimation_abs,
-            out=self._state_upper,
-        )
+        belief = estimate.state
+        self._belief_bounds(estimate)
         domain = self.certificate.domain
         for index in range(15):
             if (
@@ -554,7 +540,7 @@ class JointFlowCaptureGovernor:
                     self.status = "out_of_envelope"
                     return False
 
-        self._augmented_center[:15] = self.latest_belief.center
+        self._augmented_center[:15] = belief.center
         self._augmented_center[15:] = self._issued_flat
         simplex_index = self.certificate.locate_augmented_into(
             self._augmented_center,
@@ -571,9 +557,10 @@ class JointFlowCaptureGovernor:
             self.status = "out_of_envelope"
             return False
         self._predictor.predict(
-            self.latest_belief,
+            belief,
             self.issued_queue,
             simplex.gain_index,
+            local_flow=estimate.local_flow,
         )
         reference = self._backup_reference
         if not _deadline_reached(deadline):
@@ -583,6 +570,15 @@ class JointFlowCaptureGovernor:
                 simplex.progress_m,
                 simplex.terminal,
             )
+            if simplex.terminal:
+                matrix = np.vstack((matrix, np.eye(3), -np.eye(3)))
+                bounds = np.concatenate(
+                    (
+                        bounds,
+                        simplex.reference_upper,
+                        -simplex.reference_lower,
+                    )
+                )
             if matrix.shape[0] != simplex.constraint_count:
                 self.status = "out_of_envelope"
                 return False
@@ -614,8 +610,34 @@ class JointFlowCaptureGovernor:
         self.current_reference[:] = reference
         self.gain_index = simplex.gain_index
         self._terminal_cell = simplex.terminal
-        self._measured_segment[0] = state
+        self._measured_segment[0] = estimate.state.center
         return True
+
+    def _valid_estimate(self, estimate: StateFlowEstimate) -> bool:
+        self._belief_radius[:] = estimate.state.radius
+        return bool(
+            np.all(
+                self._belief_radius
+                <= self._predictor.generated.bounds.state_estimation_abs
+            )
+            and estimate.local_flow.subset(
+                self._predictor.generated.bounds.flow
+            )
+            and estimate.state.generators.shape[1]
+            <= self._predictor.max_initial_generators
+        )
+
+    def _belief_bounds(self, estimate: StateFlowEstimate) -> None:
+        np.subtract(
+            estimate.state.center,
+            self._belief_radius,
+            out=self._state_lower,
+        )
+        np.add(
+            estimate.state.center,
+            self._belief_radius,
+            out=self._state_upper,
+        )
 
 
 def _deadline_reached(deadline: float | None) -> bool:

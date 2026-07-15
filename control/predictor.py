@@ -9,8 +9,14 @@ from math import cos, sin, sqrt
 import numpy as np
 import numpy.typing as npt
 
+from control.flow import FlowBounds
 from control.interval import Interval, Zonotope
-from control.uncertainty import Bounds, FAST_PERIOD_S, PREDICTION_STAGES
+from control.uncertainty import (
+    Bounds,
+    FAST_PERIOD_S,
+    OBSERVER_PERIOD_S,
+    PREDICTION_STAGES,
+)
 from models.aircraft import Aircraft
 from models.geometry import (
     RigidBodyGeometry,
@@ -28,6 +34,7 @@ LQR_CONTROL_WEIGHT.flags.writeable = False
 REFERENCE_IDENTITY.flags.writeable = False
 MIN_GAIN_CELL_WIDTH = 0.125
 MAX_GAIN_CELL_DEPTH = 8
+MAX_INITIAL_GENERATORS = 30
 
 
 @dataclass(frozen=True)
@@ -76,6 +83,8 @@ class GainCell:
     stage_remainder_abs: npt.ArrayLike
     swept_position_remainder_abs_m: npt.ArrayLike
     contact_velocity_remainder_abs_m_s: npt.ArrayLike
+    observer_state_matrix: npt.ArrayLike
+    observer_flow_matrix: npt.ArrayLike
 
     def __post_init__(self) -> None:
         arrays = (
@@ -90,6 +99,8 @@ class GainCell:
             ("stage_remainder_abs", (15,)),
             ("swept_position_remainder_abs_m", (3,)),
             ("contact_velocity_remainder_abs_m_s", (3,)),
+            ("observer_state_matrix", (15, 15)),
+            ("observer_flow_matrix", (15, 3)),
         )
         for name, shape in arrays:
             _set_array(self, name, getattr(self, name), shape)
@@ -375,7 +386,7 @@ class FastPredictor:
     """Evaluate one ten-stage affine prediction without runtime allocation."""
 
     generated: _AircraftModel
-    max_initial_generators: int = 30
+    max_initial_generators: int = MAX_INITIAL_GENERATORS
     prediction: Prediction = field(init=False)
     _history_center: np.ndarray = field(init=False, repr=False)
     _history_reference: np.ndarray = field(init=False, repr=False)
@@ -429,14 +440,6 @@ class FastPredictor:
         )
         self.prediction.reference_center[:] = self.generated.reference_center
         self.prediction.reference_radius[:] = self.generated.reference_scale
-        flow = self.generated.bounds.flow.joint_zonotope(
-            self.generated.aircraft.strip_table.r_b_m
-        )
-        self.prediction.flow_center[:] = flow.center[:3]
-        self.prediction.flow_radius[:] = np.sum(
-            np.abs(flow.generators[:3]),
-            axis=1,
-        )
         history = self.generated.bounds.queue_length + PREDICTION_STAGES
         self._history_center = np.zeros((history, 3))
         self._history_reference = np.zeros((history, 3, 3))
@@ -495,12 +498,22 @@ class FastPredictor:
         cell_index: int,
         issued_queue_radius: npt.ArrayLike | None = None,
         populate_geometry: bool = True,
+        local_flow: FlowBounds | None = None,
     ) -> Prediction:
         """Populate and return the affine prediction for one gain cell."""
 
         cell = self.generated.cells[cell_index]
         output = self.prediction
         initial_count = belief.generators.shape[1]
+        if initial_count > self.max_initial_generators:
+            raise ValueError("initial set exceeds the predictor generator capacity")
+        if local_flow is None:
+            flow = self.generated.bounds.flow
+        else:
+            flow = local_flow
+        center_flow = Interval(flow.center_lower_m_s, flow.center_upper_m_s)
+        output.flow_center[:] = center_flow.center
+        output.flow_radius[:] = center_flow.radius
         model_count = cell.model_generators.shape[1]
         model_start = initial_count
         count = initial_count + model_count
@@ -644,9 +657,16 @@ class FastPredictor:
         result: np.ndarray,
     ) -> None:
         absolute = self._factor_abs[:count]
+        gamma = count * np.finfo(float).eps
+        inverse_roundoff = 1.0 / (1.0 - gamma)
         for row in range(generators.shape[0]):
             np.abs(generators[row, :count], out=absolute)
-            result[row] = np.add.reduce(absolute)
+            radius = np.add.reduce(absolute)
+            result[row] = (
+                0.0
+                if radius == 0.0
+                else np.nextafter(radius * inverse_roundoff, np.inf)
+            )
 
     def _canonical_initial(
         self,
@@ -1334,6 +1354,13 @@ def _gain_cell(
     )
     flow_generators = _flow_generators(aircraft, bounds, state, control)
     model_generators = _model_generators(aircraft, bounds, state, control)
+    observer_state_matrix, observer_flow_matrix = _observer_linear_model(
+        aircraft,
+        bounds,
+        state,
+        control,
+        state_scale,
+    )
     cell = GainCell(
         lower,
         upper,
@@ -1348,6 +1375,8 @@ def _gain_cell(
         bounds.stage_remainder_abs,
         np.zeros(3),
         np.zeros(3),
+        observer_state_matrix,
+        observer_flow_matrix,
     )
     return cell
 
@@ -1425,6 +1454,52 @@ def _flow_generators(
         )
         generators[:, index] = 0.5 * (upper - lower)
     return generators
+
+
+def _observer_linear_model(
+    aircraft: Aircraft,
+    bounds: Bounds,
+    state: np.ndarray,
+    control: np.ndarray,
+    state_scale: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    center_flow = np.zeros(3)
+    density = 0.5 * sum(bounds.density_kg_m3)
+
+    def step(state_value: np.ndarray, flow_value: np.ndarray) -> np.ndarray:
+        strip_flow = np.broadcast_to(
+            flow_value,
+            aircraft.strip_table.r_b_m.shape,
+        )
+        return _midpoint(
+            aircraft,
+            state_value,
+            control,
+            flow_value,
+            strip_flow,
+            density,
+            OBSERVER_PERIOD_S,
+        )
+
+    state_matrix = np.empty((15, 15))
+    for index in range(15):
+        delta = max(1.0e-7, 1.0e-5 * state_scale[index])
+        offset = np.zeros(15)
+        offset[index] = delta
+        state_matrix[:, index] = (
+            step(state + offset, center_flow)
+            - step(state - offset, center_flow)
+        ) / (2.0 * delta)
+
+    flow_matrix = np.empty((15, 3))
+    for index in range(3):
+        offset = np.zeros(3)
+        offset[index] = 1.0e-5
+        flow_matrix[:, index] = (
+            step(state, center_flow + offset)
+            - step(state, center_flow - offset)
+        ) / (2.0e-5)
+    return state_matrix, flow_matrix
 
 
 def _model_generators(
@@ -1616,6 +1691,7 @@ def _rk4(
     center_flow: np.ndarray,
     strip_flow: np.ndarray,
     density: float,
+    step_s: float = FAST_PERIOD_S,
 ) -> np.ndarray:
     def derivative(value: np.ndarray) -> np.ndarray:
         return aircraft.derivative_local_flow(
@@ -1626,12 +1702,34 @@ def _rk4(
             density,
         )
 
-    step = FAST_PERIOD_S
+    step = step_s
     k1 = derivative(state)
     k2 = derivative(state + 0.5 * step * k1)
     k3 = derivative(state + 0.5 * step * k2)
     k4 = derivative(state + step * k3)
     return state + step * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+
+
+def _midpoint(
+    aircraft: Aircraft,
+    state: np.ndarray,
+    control: np.ndarray,
+    center_flow: np.ndarray,
+    strip_flow: np.ndarray,
+    density: float,
+    step_s: float,
+) -> np.ndarray:
+    def derivative(value: np.ndarray) -> np.ndarray:
+        return aircraft.derivative_local_flow(
+            value,
+            control,
+            center_flow,
+            strip_flow,
+            density,
+        )
+
+    initial = derivative(state)
+    return state + step_s * derivative(state + 0.5 * step_s * initial)
 
 
 def _set_array(

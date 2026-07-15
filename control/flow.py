@@ -277,6 +277,17 @@ class FlowBounds:
 
         return self.joint_flow(strip_b_m).zonotope()
 
+    def subset(self, other: FlowBounds) -> bool:
+        """Return whether these component bounds lie inside another set."""
+
+        return bool(
+            np.all(self.center_lower_m_s >= other.center_lower_m_s)
+            and np.all(self.center_upper_m_s <= other.center_upper_m_s)
+            and np.all(self.gradient_lower_s >= other.gradient_lower_s)
+            and np.all(self.gradient_upper_s <= other.gradient_upper_s)
+            and np.all(self.remainder_abs_m_s <= other.remainder_abs_m_s)
+        )
+
 
 def _set_array(
     instance: object,

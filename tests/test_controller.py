@@ -13,17 +13,26 @@ import pytest
 from control.capture import (
     _LookupNode,
     CaptureCertificate,
+    CaptureConstraintBuilder,
     CaptureSimplex,
 )
 from control.flow import FlowBounds
 from control.governor import JointFlowCaptureGovernor, _SOLVED, _TIMED_OUT
+from control.interval import Zonotope
 from control.missions import CompilationDomain, Halfspaces
+from control.observer import StateFlowEstimate
 from control.predictor import (
     _AircraftModel,
+    FastPredictor,
     GeneratedAircraft,
     _generate_aircraft,
 )
-from control.uncertainty import Bounds, NEXT_UPDATE_STAGE, PREDICTION_STAGES
+from control.uncertainty import (
+    Bounds,
+    FAST_PERIOD_S,
+    NEXT_UPDATE_STAGE,
+    PREDICTION_STAGES,
+)
 from models.aircraft import Aircraft
 from models.geometry import RigidBodyGeometry
 
@@ -151,6 +160,21 @@ def _mission(generated: GeneratedAircraft) -> _Mission:
     return _Mission()
 
 
+def _estimate(
+    generated: GeneratedAircraft,
+    state: np.ndarray,
+    timestamp_s: float = 0.0,
+) -> StateFlowEstimate:
+    flow = generated.bounds.flow
+    flow_center = 0.5 * (flow.center_lower_m_s + flow.center_upper_m_s)
+    flow_radius = 0.25 * (flow.center_upper_m_s - flow.center_lower_m_s)
+    center = np.concatenate((np.asarray(state, dtype=float).reshape(15), flow_center))
+    generators = np.diag(
+        np.concatenate((0.5 * generated.bounds.state_estimation_abs, flow_radius))
+    )
+    return StateFlowEstimate(timestamp_s, Zonotope(center, generators), flow)
+
+
 def _certificate(
     generated: GeneratedAircraft,
     matrix: np.ndarray | None = None,
@@ -158,6 +182,8 @@ def _certificate(
     backup: np.ndarray | None = None,
     terminal: bool = False,
     mission: _Mission | None = None,
+    reference_lower: np.ndarray | None = None,
+    reference_upper: np.ndarray | None = None,
 ) -> CaptureCertificate:
     rows = np.zeros((1, 3)) if matrix is None else np.asarray(matrix, dtype=float)
     limits = (
@@ -181,10 +207,20 @@ def _certificate(
     simplex = CaptureSimplex(
         vertices,
         backup_reference,
-        rows.shape[0],
+        rows.shape[0] + (6 if terminal else 0),
         0,
         1.0,
         terminal,
+        (
+            generated.aircraft.control_lower_rad
+            if reference_lower is None
+            else reference_lower
+        ),
+        (
+            generated.aircraft.control_upper_rad
+            if reference_upper is None
+            else reference_upper
+        ),
     )
     queue_size = 3 * generated.bounds.queue_length
     augmented_offset = np.concatenate((generated.cells[0].anchor, np.zeros(queue_size)))
@@ -221,7 +257,7 @@ def _activate(
     assert certificate.mission is mission
     controller.activate(
         certificate,
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor),
         np.zeros(3) if reference is None else reference,
         np.zeros((generated.bounds.queue_length, 3)) if queue is None else queue,
     )
@@ -272,10 +308,145 @@ def test_capture_certificate_is_bound_to_its_aircraft_core(
     with pytest.raises(ValueError, match="another aircraft core"):
         controller.activate(
             certificate,
-            generated.cells[0].anchor,
+            _estimate(generated, generated.cells[0].anchor),
             np.zeros(3),
             np.zeros((generated.bounds.queue_length, 3)),
         )
+
+
+def test_runtime_rejects_an_oversized_observer_state_set(
+    generated: GeneratedAircraft,
+) -> None:
+    mission = _mission(generated)
+    certificate = _certificate(generated, mission=mission)
+    controller = JointFlowCaptureGovernor(generated)
+    estimate = _estimate(generated, generated.cells[0].anchor)
+    controller.activate(
+        certificate,
+        estimate,
+        np.zeros(3),
+        np.zeros((generated.bounds.queue_length, 3)),
+    )
+    generators = estimate.joint.generators.copy()
+    generators[0, 0] = 2.0 * generated.bounds.state_estimation_abs[0]
+    oversized = StateFlowEstimate(
+        0.0,
+        Zonotope(estimate.joint.center, generators),
+        estimate.local_flow,
+    )
+
+    assert controller.command(oversized, np.zeros(3), perf_counter() + 1.0) is None
+    assert controller.status == "out_of_envelope"
+
+
+def test_runtime_rejects_flow_outside_the_compiled_envelope(
+    generated: GeneratedAircraft,
+) -> None:
+    mission = _mission(generated)
+    certificate = _certificate(generated, mission=mission)
+    controller = JointFlowCaptureGovernor(generated)
+    estimate = _estimate(generated, generated.cells[0].anchor)
+    controller.activate(
+        certificate,
+        estimate,
+        np.zeros(3),
+        np.zeros((generated.bounds.queue_length, 3)),
+    )
+    certified = generated.bounds.flow
+    outside = FlowBounds(
+        certified.center_lower_m_s - 0.01,
+        certified.center_upper_m_s,
+        certified.gradient_lower_s,
+        certified.gradient_upper_s,
+        certified.remainder_abs_m_s,
+    )
+    invalid = StateFlowEstimate(0.0, estimate.joint, outside)
+
+    assert controller.command(invalid, np.zeros(3), perf_counter() + 1.0) is None
+    assert controller.status == "out_of_envelope"
+
+
+def test_runtime_rejects_a_reused_estimate(
+    generated: GeneratedAircraft,
+) -> None:
+    mission = _mission(generated)
+    certificate = _certificate(generated, mission=mission)
+    controller = JointFlowCaptureGovernor(generated)
+    initial = generated.cells[0].anchor
+    controller.activate(
+        certificate,
+        _estimate(generated, initial),
+        np.zeros(3),
+        np.zeros((generated.bounds.queue_length, 3)),
+    )
+    controller._constraint_builder.rows = mission.online_rows
+    estimate = _estimate(generated, initial, FAST_PERIOD_S)
+    assert controller.command(estimate, np.zeros(3), perf_counter() + 30.0) is not None
+
+    assert controller.command(estimate, np.zeros(3), perf_counter() + 30.0) is None
+    assert controller.status == "out_of_envelope"
+
+
+def test_runtime_rejects_excess_initial_generators(
+    generated: GeneratedAircraft,
+) -> None:
+    state = generated.cells[0].anchor
+    center = np.concatenate((state, np.zeros(3)))
+    generators = np.zeros((18, 31))
+    generators[:15] = generated.bounds.state_estimation_abs[:, None] / 62.0
+    estimate = StateFlowEstimate(
+        0.0,
+        Zonotope(center, generators),
+        generated.bounds.flow,
+    )
+    controller = JointFlowCaptureGovernor(generated)
+    controller.activate(
+        _certificate(generated),
+        estimate,
+        np.zeros(3),
+        np.zeros((generated.bounds.queue_length, 3)),
+    )
+
+    assert controller.status == "out_of_envelope"
+
+
+def test_current_flow_changes_online_air_velocity_rows(
+    generated: GeneratedAircraft,
+) -> None:
+    mission = _mission(generated)
+    certificate = _certificate(generated, mission=mission)
+    predictor = FastPredictor(generated)
+    builder = CaptureConstraintBuilder(generated, mission, certificate.domain)
+    state = _estimate(generated, generated.cells[0].anchor).state
+    queue = np.zeros((generated.bounds.queue_length, 3))
+    certified = generated.bounds.flow
+
+    def rows(center_x: float) -> np.ndarray:
+        local_flow = FlowBounds(
+            (center_x - 0.001, -0.001, -0.001),
+            (center_x + 0.001, 0.001, 0.001),
+            certified.gradient_lower_s,
+            certified.gradient_upper_s,
+            certified.remainder_abs_m_s,
+        )
+        prediction = predictor.predict(
+            state,
+            queue,
+            0,
+            local_flow=local_flow,
+        )
+        return np.array(
+            [
+                limit - prediction.air_velocity_support(1, direction)[0]
+                for direction, limit in zip(
+                    builder.air_velocity_directions,
+                    builder.air_velocity_bounds,
+                    strict=True,
+                )
+            ]
+        )
+
+    assert not np.array_equal(rows(-0.01), rows(0.01))
 
 
 def test_governor_runs_exactly_every_five_fast_commands(
@@ -291,7 +462,7 @@ def test_governor_runs_exactly_every_five_fast_commands(
     first_nominal = np.full(3, 0.02)
     assert (
         controller.command(
-            generated.cells[0].anchor,
+            _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
             first_nominal,
             deadline,
         )
@@ -301,7 +472,11 @@ def test_governor_runs_exactly_every_five_fast_commands(
     for stage in range(1, NEXT_UPDATE_STAGE):
         assert (
             controller.command(
-                _nominal_state(controller, stage),
+                _estimate(
+                    generated,
+                    _nominal_state(controller, stage),
+                    (stage + 1) * FAST_PERIOD_S,
+                ),
                 np.full(3, -0.02),
                 deadline,
             )
@@ -310,7 +485,18 @@ def test_governor_runs_exactly_every_five_fast_commands(
         np.testing.assert_array_equal(controller.current_reference, first)
 
     next_state = _nominal_state(controller, NEXT_UPDATE_STAGE)
-    assert controller.command(next_state, np.full(3, -0.02), deadline) is not None
+    assert (
+        controller.command(
+            _estimate(
+                generated,
+                next_state,
+                (NEXT_UPDATE_STAGE + 1) * FAST_PERIOD_S,
+            ),
+            np.full(3, -0.02),
+            deadline,
+        )
+        is not None
+    )
     assert not np.array_equal(controller.current_reference, first)
 
 
@@ -332,7 +518,7 @@ def test_feedback_uses_each_short_prediction_center_and_exact_fifo(
     )
     deadline = perf_counter() + 30.0
     first = controller.command(
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
         np.full(3, 0.01),
         deadline,
     )
@@ -347,7 +533,11 @@ def test_feedback_uses_each_short_prediction_center_and_exact_fifo(
         prediction.issued_center[1]
         + prediction.issued_reference[1] @ controller.current_reference
     )
-    second = controller.command(state, np.zeros(3), deadline)
+    second = controller.command(
+        _estimate(generated, state, 2.0 * FAST_PERIOD_S),
+        np.zeros(3),
+        deadline,
+    )
     assert second is not None
     np.testing.assert_allclose(second, expected, atol=2.0e-15)
 
@@ -364,7 +554,7 @@ def test_complete_fast_belief_must_remain_in_prediction(
     deadline = perf_counter() + 30.0
     assert (
         controller.command(
-            generated.cells[0].anchor,
+            _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
             np.zeros(3),
             deadline,
         )
@@ -373,7 +563,14 @@ def test_complete_fast_belief_must_remain_in_prediction(
     escaped = _nominal_state(controller, 1)
     escaped[3] += 1.0
     queue = controller.issued_queue.copy()
-    assert controller.command(escaped, np.zeros(3), deadline) is None
+    assert (
+        controller.command(
+            _estimate(generated, escaped, 2.0 * FAST_PERIOD_S),
+            np.zeros(3),
+            deadline,
+        )
+        is None
+    )
     assert controller.status == "out_of_envelope"
     np.testing.assert_array_equal(controller.issued_queue, queue)
 
@@ -394,10 +591,28 @@ def test_next_governor_sample_must_match_the_previous_stage_five_set(
             if stage == 0
             else _nominal_state(controller, stage)
         )
-        assert controller.command(state, np.zeros(3), deadline) is not None
+        assert (
+            controller.command(
+                _estimate(generated, state, (stage + 1) * FAST_PERIOD_S),
+                np.zeros(3),
+                deadline,
+            )
+            is not None
+        )
     escaped = _nominal_state(controller, NEXT_UPDATE_STAGE)
     escaped[3] += 1.0
-    assert controller.command(escaped, np.zeros(3), deadline) is None
+    assert (
+        controller.command(
+            _estimate(
+                generated,
+                escaped,
+                (NEXT_UPDATE_STAGE + 1) * FAST_PERIOD_S,
+            ),
+            np.zeros(3),
+            deadline,
+        )
+        is None
+    )
     assert controller.status == "out_of_envelope"
 
 
@@ -413,7 +628,14 @@ def test_complete_state_domain_is_checked_before_projected_membership(
     )
     state = generated.cells[0].anchor.copy()
     state[3] = certificate.domain.upper[3]
-    assert controller.command(state, np.zeros(3), perf_counter() + 30.0) is None
+    assert (
+        controller.command(
+            _estimate(generated, state, FAST_PERIOD_S),
+            np.zeros(3),
+            perf_counter() + 30.0,
+        )
+        is None
+    )
     assert controller.status == "out_of_envelope"
 
 
@@ -447,7 +669,7 @@ def test_runtime_does_not_add_estimation_fiber_twice(
     monkeypatch.setattr(CaptureCertificate, "locate_augmented_into", locate)
     assert (
         controller.command(
-            generated.cells[0].anchor,
+            _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
             np.zeros(3),
             perf_counter() + 30.0,
         )
@@ -469,7 +691,7 @@ def test_timeout_uses_only_the_compiled_backup(
     )
     monkeypatch.setattr(controller._solver, "solve_into", lambda *_: _TIMED_OUT)
     command = controller.command(
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
         np.full(3, 0.1),
         perf_counter() + 1.0,
     )
@@ -504,7 +726,7 @@ def test_positive_solver_residual_leaves_the_capture_envelope(
 
     monkeypatch.setattr(controller._solver, "solve_into", unsafe_result)
     command = controller.command(
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
         np.zeros(3),
         perf_counter() + 1.0,
     )
@@ -529,7 +751,7 @@ def test_expired_update_deadline_stops_before_prediction(
 
     monkeypatch.setattr(controller._predictor, "predict", fail)
     command = controller.command(
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
         np.zeros(3),
         perf_counter(),
     )
@@ -559,7 +781,7 @@ def test_deadline_after_prediction_uses_backup_without_building_rows(
 
     monkeypatch.setattr(controller._constraint_builder, "rows", fail)
     command = controller.command(
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
         np.full(3, 0.1),
         perf_counter() + 1.0,
     )
@@ -589,7 +811,7 @@ def test_deadline_after_rows_uses_backup_without_solving(
 
     monkeypatch.setattr(controller._solver, "solve_into", fail)
     command = controller.command(
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
         np.full(3, 0.1),
         perf_counter() + 1.0,
     )
@@ -610,7 +832,7 @@ def test_infeasible_online_set_uses_the_compiled_backup(
     )
     monkeypatch.setattr(controller._solver, "solve_into", lambda *_: -1)
     command = controller.command(
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
         np.full(3, 0.1),
         perf_counter() + 1.0,
     )
@@ -635,7 +857,7 @@ def test_empty_current_governor_polytope_uses_the_compiled_backup(
         ),
     )
     command = controller.command(
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
         np.zeros(3),
         perf_counter() + 30.0,
     )
@@ -659,7 +881,7 @@ def test_raw_command_and_initial_fifo_require_command_error_margin(
     queue = raw.issued_queue.copy()
     assert (
         raw.command(
-            generated.cells[0].anchor,
+            _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
             unsafe_reference,
             perf_counter() + 30.0,
         )
@@ -684,7 +906,7 @@ def test_current_prediction_rows_constrain_the_reference(
         ),
     )
     command = controller.command(
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
         np.array((0.1, 0.0, 0.0)),
         perf_counter() + 30.0,
     )
@@ -707,7 +929,7 @@ def test_measured_queue_changes_the_current_admissible_set(
             queue,
         )
         command = controller.command(
-            generated.cells[0].anchor,
+            _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
             np.array((0.1, 0.0, 0.0)),
             perf_counter() + 30.0,
         )
@@ -728,12 +950,23 @@ def test_terminal_event_is_checked_on_each_measured_segment(
     )
     deadline = perf_counter() + 30.0
     initial = generated.cells[0].anchor
-    assert controller.command(initial, np.zeros(3), deadline) is not None
+    assert (
+        controller.command(
+            _estimate(generated, initial, FAST_PERIOD_S),
+            np.zeros(3),
+            deadline,
+        )
+        is not None
+    )
     mission.terminal_x = 0.5 * (initial[0] + _nominal_state(controller, 1)[0])
     queue = controller.issued_queue.copy()
     assert (
         controller.command(
-            _nominal_state(controller, 1),
+            _estimate(
+                generated,
+                _nominal_state(controller, 1),
+                2.0 * FAST_PERIOD_S,
+            ),
             np.zeros(3),
             deadline,
         )
@@ -743,6 +976,33 @@ def test_terminal_event_is_checked_on_each_measured_segment(
     assert mission.last_segment is not None
     assert mission.last_segment.shape == (2, 15)
     np.testing.assert_array_equal(controller.issued_queue, queue)
+
+
+def test_terminal_reference_stays_inside_the_oracle_certified_hull(
+    generated: GeneratedAircraft,
+) -> None:
+    mission = _mission(generated)
+    controller = _activate(
+        generated,
+        mission,
+        _certificate(
+            generated,
+            terminal=True,
+            mission=mission,
+            reference_lower=np.full(3, -0.01),
+            reference_upper=np.full(3, 0.01),
+        ),
+    )
+
+    command = controller.command(
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
+        np.full(3, 0.1),
+        perf_counter() + 30.0,
+    )
+
+    assert command is not None
+    assert np.all(controller.current_reference >= -0.01)
+    assert np.all(controller.current_reference <= 0.01)
 
 
 def test_terminal_reference_is_held_for_the_complete_event_horizon(
@@ -756,18 +1016,43 @@ def test_terminal_reference_is_held_for_the_complete_event_horizon(
     )
     deadline = perf_counter() + 30.0
     initial = generated.cells[0].anchor
-    assert controller.command(initial, np.full(3, 0.02), deadline) is not None
+    assert (
+        controller.command(
+            _estimate(generated, initial, FAST_PERIOD_S),
+            np.full(3, 0.02),
+            deadline,
+        )
+        is not None
+    )
     reference = controller.current_reference.copy()
 
     for stage in range(1, PREDICTION_STAGES):
         state = _nominal_state(controller, stage)
-        assert controller.command(state, np.full(3, -0.02), deadline) is not None
+        assert (
+            controller.command(
+                _estimate(generated, state, (stage + 1) * FAST_PERIOD_S),
+                np.full(3, -0.02),
+                deadline,
+            )
+            is not None
+        )
         np.testing.assert_array_equal(controller.current_reference, reference)
 
     previous_state = _nominal_state(controller, PREDICTION_STAGES - 1)
     terminal_state = _nominal_state(controller, PREDICTION_STAGES)
     mission.terminal_x = 0.5 * (previous_state[0] + terminal_state[0])
-    assert controller.command(terminal_state, np.zeros(3), deadline) is None
+    assert (
+        controller.command(
+            _estimate(
+                generated,
+                terminal_state,
+                (PREDICTION_STAGES + 1) * FAST_PERIOD_S,
+            ),
+            np.zeros(3),
+            deadline,
+        )
+        is None
+    )
     assert controller.status == "terminal"
     assert mission.last_segment is not None
     assert mission.last_segment.shape == (2, 15)
@@ -784,7 +1069,7 @@ def test_nonterminal_simplex_does_not_run_the_event_monitor(
         _certificate(generated, mission=mission),
     )
     command = controller.command(
-        generated.cells[0].anchor,
+        _estimate(generated, generated.cells[0].anchor, FAST_PERIOD_S),
         np.zeros(3),
         perf_counter() + 30.0,
     )

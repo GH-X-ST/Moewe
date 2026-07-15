@@ -43,6 +43,8 @@ class CaptureSimplex:
     gain_index: int
     progress_m: float
     terminal: bool
+    reference_lower: npt.ArrayLike
+    reference_upper: npt.ArrayLike
     _barycentric_matrix: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -52,17 +54,31 @@ class CaptureSimplex:
         dimension = vertices.shape[1]
         vertices = vertices.copy()
         backup = np.asarray(self.backup_reference, dtype=float).reshape(3).copy()
+        reference_lower = np.asarray(self.reference_lower, dtype=float).reshape(3).copy()
+        reference_upper = np.asarray(self.reference_upper, dtype=float).reshape(3).copy()
         if self.constraint_count <= 0:
             raise ValueError("constraint count must be positive")
+        if np.any(reference_lower > reference_upper):
+            raise ValueError("reference lower bound exceeds upper bound")
+        if np.any(backup < reference_lower) or np.any(backup > reference_upper):
+            raise ValueError("backup lies outside its certified reference bounds")
         augmented = np.column_stack((vertices, np.ones(dimension + 1)))
         singular = np.linalg.svd(augmented, compute_uv=False)
         if singular[-1] <= BOUNDARY_TOLERANCE * singular[0]:
             raise ValueError("simplex vertices are affinely dependent")
         barycentric = np.linalg.inv(augmented).T
-        for value in (vertices, backup, barycentric):
+        for value in (
+            vertices,
+            backup,
+            reference_lower,
+            reference_upper,
+            barycentric,
+        ):
             value.flags.writeable = False
         object.__setattr__(self, "vertices", vertices)
         object.__setattr__(self, "backup_reference", backup)
+        object.__setattr__(self, "reference_lower", reference_lower)
+        object.__setattr__(self, "reference_upper", reference_upper)
         object.__setattr__(self, "_barycentric_matrix", barycentric)
 
     def barycentric(self, normalized: npt.ArrayLike) -> np.ndarray:
@@ -366,6 +382,21 @@ class CaptureConstraintBuilder:
         self.reference_center = 0.5 * (lower + upper)
         self.reference_scale = 0.5 * (upper - lower)
         self.hard_matrix, self.hard_bounds = _hard_halfspaces(generated)
+        alpha = tan(generated.bounds.alpha_abs_max_rad)
+        self.air_velocity_directions = np.vstack(
+            (
+                tuple(product((-1.0, 1.0), repeat=3)),
+                (-1.0, 0.0, 0.0),
+                (-alpha, 0.0, 1.0),
+                (-alpha, 0.0, -1.0),
+            )
+        )
+        self.air_velocity_bounds = np.concatenate(
+            (
+                np.full(8, generated.bounds.airspeed_m_s[1]),
+                (-generated.bounds.airspeed_m_s[0], 0.0, 0.0),
+            )
+        )
 
     def rows(
         self,
@@ -404,6 +435,17 @@ class CaptureConstraintBuilder:
                 strict=True,
             ):
                 offset, reference = prediction.state_support(stage, direction)
+                matrices.append(reference)
+                bounds.append(float(limit - offset))
+            for direction, limit in zip(
+                self.air_velocity_directions,
+                self.air_velocity_bounds,
+                strict=True,
+            ):
+                offset, reference = prediction.air_velocity_support(
+                    stage,
+                    direction,
+                )
                 matrices.append(reference)
                 bounds.append(float(limit - offset))
 
@@ -958,6 +1000,8 @@ class _CaptureCompiler:
         backup = self._linear_feasibility(matrix, limits)
         if backup is None:
             return None
+        reference_lower = self.reference_lower
+        reference_upper = self.reference_upper
         if terminal:
             reference = self._reference_hull(matrix, limits)
             if reference is None:
@@ -974,13 +1018,17 @@ class _CaptureCompiler:
                 self.mission,
             ):
                 return None
+            reference_lower = reference.lower
+            reference_upper = reference.upper
         return CaptureSimplex(
             vertices,
             backup,
-            matrix.shape[0],
+            matrix.shape[0] + (6 if terminal else 0),
             gain_index,
             progress,
             terminal,
+            reference_lower,
+            reference_upper,
         )
 
     def _belief(
@@ -1369,12 +1417,6 @@ def _hard_halfspaces(
     aircraft = generated.aircraft
     rows: list[np.ndarray] = []
     limits: list[float] = []
-    flow = bounds.flow.joint_zonotope(aircraft.strip_table.r_b_m)
-    flow_center = flow.center[:3]
-    flow_radius = np.sum(np.abs(flow.generators[:3]), axis=1)
-
-    def flow_support(direction: np.ndarray) -> float:
-        return float(direction @ flow_center + np.abs(direction) @ flow_radius)
 
     def append(index: int, coefficient: float, limit: float) -> None:
         row = np.zeros(15)
@@ -1386,28 +1428,6 @@ def _hard_halfspaces(
     append(3, -1.0, bounds.roll_abs_max_rad)
     append(4, 1.0, bounds.pitch_abs_max_rad)
     append(4, -1.0, bounds.pitch_abs_max_rad)
-    for signs in product((-1.0, 1.0), repeat=3):
-        row = np.zeros(15)
-        row[6:9] = signs
-        rows.append(row)
-        direction = np.asarray(signs)
-        limits.append(bounds.airspeed_m_s[1] - flow_support(-direction))
-    forward = np.array((1.0, 0.0, 0.0))
-    append(
-        6,
-        -1.0,
-        -bounds.airspeed_m_s[0] - flow_support(forward),
-    )
-    alpha = tan(bounds.alpha_abs_max_rad)
-    row = np.zeros(15)
-    row[8] = 1.0
-    row[6] = -alpha
-    rows.append(row)
-    limits.append(-flow_support(-row[6:9]))
-    row = row.copy()
-    row[8] = -1.0
-    rows.append(row)
-    limits.append(-flow_support(-row[6:9]))
     for index in range(9, 12):
         append(index, 1.0, bounds.body_rate_abs_max_rad_s)
         append(index, -1.0, bounds.body_rate_abs_max_rad_s)
