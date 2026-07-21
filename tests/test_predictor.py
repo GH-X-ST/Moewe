@@ -282,6 +282,87 @@ def test_cg_airspeed_support_includes_joint_flow_uncertainty() -> None:
         assert -speed <= lower + negative_coefficient @ np.zeros(3)
 
 
+def test_runtime_center_flow_recenters_the_state_and_air_support() -> None:
+    _, bounds, generated = _generated()
+    cell = generated.cells[0]
+    belief = _state_belief(cell.anchor, bounds)
+    queue = np.zeros((bounds.queue_length, 3))
+    certified = bounds.flow
+    radius = np.full(3, 0.001)
+
+    def predict(center: np.ndarray, flow_radius: np.ndarray):
+        flow = FlowBounds(
+            center - flow_radius,
+            center + flow_radius,
+            certified.gradient_lower_s,
+            certified.gradient_upper_s,
+            certified.remainder_abs_m_s,
+        )
+        return FastPredictor(generated).predict(
+            belief,
+            queue,
+            0,
+            local_flow=flow,
+        )
+
+    first = predict(np.array((-0.01, 0.0, 0.0)), radius)
+    second = predict(np.array((0.01, 0.0, 0.0)), radius)
+    point = predict(np.array((0.02, -0.02, 0.02)), np.zeros(3))
+    global_prediction = FastPredictor(generated).predict(belief, queue, 0)
+    compiled_radius = 0.5 * (certified.center_upper_m_s - certified.center_lower_m_s)
+    scale = radius / compiled_radius
+    flow_count = cell.flow_generators.shape[1]
+    for stage in range(PREDICTION_STAGES):
+        flow_start = first.generator_count[stage]
+        flow_stop = flow_start + flow_count
+        np.testing.assert_allclose(
+            first.state_generators[stage + 1, :, flow_start : flow_start + 3],
+            cell.flow_generators[:, :3] * scale,
+        )
+        np.testing.assert_array_equal(
+            first.state_generators[stage + 1, :, flow_start + 3 : flow_stop],
+            cell.flow_generators[:, 3:],
+        )
+        np.testing.assert_array_equal(
+            point.state_generators[stage + 1, :, flow_start : flow_start + 3],
+            0.0,
+        )
+    flow_start = first.generator_count[0]
+    flow_stop = flow_start + flow_count
+    remainder_start = flow_stop + 3
+    recenter_radius = (
+        np.diag(first.state_generators[1, :, remainder_start : remainder_start + 15])
+        - cell.stage_remainder_abs
+    )
+    removed_radius = np.sum(
+        np.abs(cell.flow_generators[:, :3] * (1.0 - scale)),
+        axis=1,
+    )
+    assert np.all(recenter_radius >= 0.0)
+    assert np.all(
+        recenter_radius[removed_radius > 0.0] < removed_radius[removed_radius > 0.0]
+    )
+    assert np.any(first.state_radius[1] < global_prediction.state_radius[1])
+
+    normalized_delta = np.array((0.02, 0.0, 0.0)) / compiled_radius
+    center_delta = cell.flow_generators[:, :3] @ normalized_delta
+    np.testing.assert_allclose(
+        second.state_center[1] - first.state_center[1],
+        center_delta,
+    )
+    assert not np.array_equal(first.state_center[1:], second.state_center[1:])
+
+    direction = np.array((1.0, 0.0, 0.0))
+    first_support = first.air_velocity_support(1, direction)[0]
+    second_support = second.air_velocity_support(1, direction)[0]
+    expected_support_delta = center_delta[6] - 0.02
+    np.testing.assert_allclose(
+        second_support - first_support,
+        expected_support_delta,
+    )
+    assert first.airspeed_support(1, 1.0)[0] != second.airspeed_support(1, 1.0)[0]
+
+
 def test_all_uncertainty_groups_enter_one_joint_prediction() -> None:
     _, bounds, generated = _generated()
     cell = generated.cells[0]

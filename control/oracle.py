@@ -10,7 +10,12 @@ from typing import TypedDict, cast
 import numpy as np
 import numpy.typing as npt
 
-from control.flow import SHARED_FLOW_GENERATOR_COUNT, JointFlow
+from control.flow import (
+    CENTER_FLOW_GENERATOR_COUNT,
+    SHARED_FLOW_GENERATOR_COUNT,
+    FlowBounds,
+    JointFlow,
+)
 from control.interval import AffineForm, Interval, Zonotope
 from control.missions import GateMission, LandingMission, Mission
 from control.predictor import (
@@ -177,7 +182,10 @@ class NonlinearOracle:
     picard_iterations: int = 16
     max_subdivisions: int = 4
     max_generators: int = 120
+    flow_bounds: FlowBounds | None = None
     _flow: JointFlow = field(init=False, repr=False)
+    _flow_form: AffineForm = field(init=False, repr=False)
+    _flow_noncenter_radius: np.ndarray = field(init=False, repr=False)
     _flow_shape: tuple[int, int] = field(init=False, repr=False)
     _locations: Interval = field(init=False, repr=False)
     _spans: Interval = field(init=False, repr=False)
@@ -185,7 +193,17 @@ class NonlinearOracle:
 
     def __post_init__(self) -> None:
         table = self.aircraft.strip_table
-        self._flow = self.bounds.flow.joint_flow(table.r_b_m)
+        flow = self.bounds.flow if self.flow_bounds is None else self.flow_bounds
+        self._flow = flow.joint_flow(table.r_b_m)
+        self._flow_form = self._flow.affine_form()
+        noncenter_generators = self._flow_form.generators[
+            ...,
+            CENTER_FLOW_GENERATOR_COUNT:,
+        ].reshape(-1, self._flow_form.generator_count - CENTER_FLOW_GENERATOR_COUNT)
+        self._flow_noncenter_radius = Zonotope(
+            np.zeros(self._flow_form.center.size),
+            noncenter_generators,
+        ).radius.reshape(self._flow_form.center.shape)
         self._flow_shape = (table.r_b_m.shape[0] + 1, 3)
         self._locations = Interval.point(table.r_b_m)
         self._spans = Interval.point(table.span_axis_b)
@@ -244,6 +262,9 @@ class NonlinearOracle:
             queue_centers,
             cell_index,
             issued_queue_radius=queue_radii,
+            local_flow=(
+                self.bounds.flow if self.flow_bounds is None else self.flow_bounds
+            ),
         )
         initial_geometry = self._geometry(state.interval_hull())
         stages = []
@@ -288,33 +309,254 @@ class NonlinearOracle:
         """Generate complete-box local remainder bounds for every stage."""
 
         result = self.propagate(initial, issued_queue, cell, reference)
+        state = (
+            initial
+            if isinstance(initial, Zonotope)
+            else Zonotope.from_interval(initial)
+        )
+        queue = self._command_queue(issued_queue)
+        reference_box = (
+            reference
+            if isinstance(reference, Interval)
+            else Interval.point(np.asarray(reference, dtype=float).reshape(3))
+        )
+        cell_index = next(
+            index
+            for index, generated_cell in enumerate(self.generated.cells)
+            if generated_cell is cell
+        )
+        fast = FastPredictor(self.generated).predict(
+            state,
+            np.stack([command.center for command in queue]),
+            cell_index,
+            issued_queue_radius=np.stack([command.radius for command in queue]),
+            local_flow=(
+                self.bounds.flow if self.flow_bounds is None else self.flow_bounds
+            ),
+        )
         nonlinear = np.empty((PREDICTION_STAGES, 15))
         numerical = np.empty_like(nonlinear)
-        flow_radius = np.sum(np.abs(cell.flow_generators), axis=1)
-        model_radius = np.sum(np.abs(cell.model_generators), axis=1)
         for index, stage in enumerate(result.stages):
             state_box = stage.initial.interval_hull()
-            affine = state_box.affine_map(cell.state_matrix)
-            affine += stage.applied_command.affine_map(cell.control_matrix)
-            affine += cell.offset
-            affine += Interval.from_midpoint(
-                np.zeros(15),
-                flow_radius + model_radius,
+            nonlinear[index] = self._flow_remainder(
+                fast,
+                index,
+                reference_box,
+                stage.applied_command,
+                cell,
             )
-            successor = stage.successor.interval_hull()
-            gap = np.maximum(
-                np.maximum(
-                    affine.lower - successor.lower, successor.upper - affine.upper
-                ),
-                0.0,
-            )
-            nonlinear[index] = np.nextafter(gap, np.inf)
             numerical[index] = _roundoff_bound(
                 cell,
                 state_box,
                 stage.applied_command,
             )
         return RemainderBounds(nonlinear, numerical)
+
+    def _flow_remainder(
+        self,
+        prediction: Prediction,
+        stage: int,
+        reference: Interval,
+        command: Interval,
+        cell: GainCell,
+    ) -> np.ndarray:
+        """Bound one stage for every certified center-flow sub-box."""
+
+        flow_count = cell.flow_generators.shape[1]
+        per_stage = flow_count + 3 + 15
+        base = int(prediction.generator_count[0])
+        factor_count = stage * CENTER_FLOW_GENERATOR_COUNT
+        basis = object()
+
+        state_count = int(prediction.generator_count[stage])
+        state_flow = np.zeros((15, factor_count))
+        state_nonflow = np.ones(state_count, dtype=bool)
+        for index in range(stage):
+            source = base + index * per_stage
+            target = index * CENTER_FLOW_GENERATOR_COUNT
+            state_flow[
+                :,
+                target : target + CENTER_FLOW_GENERATOR_COUNT,
+            ] = prediction.state_generators[
+                stage,
+                :,
+                source : source + CENTER_FLOW_GENERATOR_COUNT,
+            ]
+            state_nonflow[source : source + CENTER_FLOW_GENERATOR_COUNT] = False
+        state_reference = prediction.state_reference[stage] @ np.diag(reference.radius)
+        state_generators = np.column_stack(
+            (
+                prediction.state_generators[stage, :, :state_count][
+                    :,
+                    state_nonflow,
+                ],
+                state_reference,
+            )
+        )
+        state_center = (
+            prediction.state_center[stage]
+            + prediction.state_reference[stage] @ reference.center
+        )
+        state_form = AffineForm(
+            state_center,
+            state_flow,
+            Zonotope(np.zeros(15), state_generators).radius,
+            basis,
+        )
+        successor, durations = self._flow_affine_stage(state_form, command)
+
+        next_count = int(prediction.generator_count[stage + 1])
+        fast_flow = np.zeros((15, successor.generator_count))
+        next_nonflow = np.ones(next_count, dtype=bool)
+        for index in range(stage):
+            source = base + index * per_stage
+            target = index * CENTER_FLOW_GENERATOR_COUNT
+            fast_flow[
+                :,
+                target : target + CENTER_FLOW_GENERATOR_COUNT,
+            ] = prediction.state_generators[
+                stage + 1,
+                :,
+                source : source + CENTER_FLOW_GENERATOR_COUNT,
+            ]
+            next_nonflow[source : source + CENTER_FLOW_GENERATOR_COUNT] = False
+            next_nonflow[source + flow_count : source + flow_count + 3] = False
+        source = base + stage * per_stage
+        target = stage * CENTER_FLOW_GENERATOR_COUNT
+        for duration in durations:
+            fast_flow[
+                :,
+                target : target + CENTER_FLOW_GENERATOR_COUNT,
+            ] = prediction.state_generators[
+                stage + 1,
+                :,
+                source : source + CENTER_FLOW_GENERATOR_COUNT,
+            ] * (duration / FAST_PERIOD_S)
+            target += CENTER_FLOW_GENERATOR_COUNT
+        next_nonflow[source : source + CENTER_FLOW_GENERATOR_COUNT] = False
+        next_nonflow[source + flow_count : source + flow_count + 3] = False
+        remainder_start = base + stage * per_stage + flow_count + 3
+        next_nonflow[remainder_start : remainder_start + 15] = False
+        next_reference = prediction.state_reference[stage + 1] @ np.diag(
+            reference.radius
+        )
+        next_generators = np.column_stack(
+            (
+                prediction.state_generators[stage + 1, :, :next_count][
+                    :,
+                    next_nonflow,
+                ],
+                next_reference,
+            )
+        )
+        nonflow_radius = Interval.point(np.abs(next_generators)).sum(axis=1).lower
+        fast_center = (
+            prediction.state_center[stage + 1]
+            + prediction.state_reference[stage + 1] @ reference.center
+        )
+        fast_form = AffineForm(
+            fast_center,
+            fast_flow,
+            np.zeros(15),
+            successor.basis,
+        )
+        difference = (successor - fast_form).interval_hull()
+        difference_abs = np.maximum(
+            np.abs(difference.lower),
+            np.abs(difference.upper),
+        )
+        required = (Interval.point(difference_abs) - nonflow_radius).upper
+        return np.maximum(required, 0.0)
+
+    def _flow_affine_stage(
+        self,
+        initial: AffineForm,
+        command: Interval,
+    ) -> tuple[AffineForm, tuple[float, ...]]:
+        """Propagate a stage with fresh flow factors at every oracle step."""
+
+        state = initial
+        durations = []
+        step_s = FAST_PERIOD_S / self.substeps
+        for _ in range(self.substeps):
+            state, pieces = self._flow_affine_adaptive(
+                state,
+                command,
+                step_s,
+                0,
+            )
+            durations.extend(pieces)
+        return state, tuple(durations)
+
+    def _flow_affine_adaptive(
+        self,
+        initial: AffineForm,
+        command: Interval,
+        dt_s: float,
+        depth: int,
+    ) -> tuple[AffineForm, tuple[float, ...]]:
+        try:
+            state, flow = self._append_flow(initial)
+            return self._flow_affine_step(state, command, flow, dt_s), (dt_s,)
+        except OracleValidationError:
+            if depth >= self.max_subdivisions:
+                raise
+            midpoint, first = self._flow_affine_adaptive(
+                initial,
+                command,
+                0.5 * dt_s,
+                depth + 1,
+            )
+            successor, second = self._flow_affine_adaptive(
+                midpoint,
+                command,
+                0.5 * dt_s,
+                depth + 1,
+            )
+            return successor, first + second
+
+    def _append_flow(
+        self,
+        state: AffineForm,
+    ) -> tuple[AffineForm, AffineForm]:
+        start = state.generator_count
+        stop = start + CENTER_FLOW_GENERATOR_COUNT
+        basis = object()
+        state_generators = np.zeros(state.center.shape + (stop,))
+        state_generators[..., :start] = state.generators
+        extended = AffineForm(
+            state.center,
+            state_generators,
+            state.remainder,
+            basis,
+        )
+        flow_generators = np.zeros(self._flow_form.center.shape + (stop,))
+        flow_generators[..., start:stop] = self._flow_form.generators[
+            ...,
+            :CENTER_FLOW_GENERATOR_COUNT,
+        ]
+        flow = AffineForm(
+            self._flow_form.center,
+            flow_generators,
+            self._flow_noncenter_radius,
+            basis,
+        )
+        return extended, flow
+
+    def _flow_affine_step(
+        self,
+        initial: AffineForm,
+        command: Interval,
+        flow: AffineForm,
+        dt_s: float,
+    ) -> AffineForm:
+        derivative, _ = self._validated_derivative(
+            initial.interval_hull(),
+            command,
+            flow,
+            dt_s,
+        )
+        return initial + derivative * dt_s
 
     def certify_fast_prediction(
         self,
@@ -491,15 +733,30 @@ class NonlinearOracle:
     ) -> tuple[Zonotope, Interval]:
         initial_box = initial.interval_hull()
         flow = self._flow.affine_form()
-        derivative = self._affine_derivative(
+        derivative, continuous = self._validated_derivative(
             initial_box,
+            command,
+            flow,
+            dt_s,
+        )
+        return self._validated_successor(initial, derivative, dt_s), continuous
+
+    def _validated_derivative(
+        self,
+        initial: Interval,
+        command: Interval,
+        flow: AffineForm,
+        dt_s: float,
+    ) -> tuple[AffineForm, Interval]:
+        derivative = self._affine_derivative(
+            initial,
             command,
             flow[0],
             flow[1:],
         )
         time = Interval(0.0, dt_s)
         continuous = _inflate(
-            initial_box.hull(initial_box + time * derivative.interval_hull()),
+            initial.hull(initial + time * derivative.interval_hull()),
             0.25,
         )
         for _ in range(self.picard_iterations):
@@ -509,11 +766,11 @@ class NonlinearOracle:
                 flow[0],
                 flow[1:],
             )
-            image = initial_box + time * derivative.interval_hull()
+            image = initial + time * derivative.interval_hull()
             if not self._inside_domain(image, flow[0].interval_hull()):
                 raise OracleValidationError("reachable set left the hard domain")
             if image.subset(continuous):
-                return self._validated_successor(initial, derivative, dt_s), continuous
+                return derivative, continuous
             continuous = _inflate(continuous.hull(image), 0.25)
         raise OracleValidationError("Picard enclosure did not converge")
 
@@ -1072,6 +1329,7 @@ def _verify_gain_cell(
         queue_center,
         0,
         queue_radius,
+        local_flow=generated.bounds.flow,
     )
     if not _prediction_contains(fast, nonlinear, reference, False):
         return None
@@ -1097,6 +1355,7 @@ def _verify_gain_cell(
         queue_center,
         0,
         queue_radius,
+        local_flow=generated.bounds.flow,
     )
     if not _prediction_contains(verified_fast, nonlinear, reference, True):
         return None

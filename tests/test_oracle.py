@@ -8,15 +8,16 @@ import numpy as np
 import pytest
 
 from control.flow import SHARED_FLOW_GENERATOR_COUNT, FlowBounds
-from control.interval import Interval, Zonotope
+from control.interval import AffineForm, Interval, Zonotope
 from control.missions import FreeSpace, GateMission, LandingMission
 from control.oracle import (
     GeometryEnclosure,
     NonlinearOracle,
     OraclePrediction,
     OracleStage,
+    _roundoff_bound,
 )
-from control.predictor import _generate_aircraft
+from control.predictor import FastPredictor, _generate_aircraft
 from control.uncertainty import Bounds, FAST_PERIOD_S, PREDICTION_STAGES
 from models.aircraft import Aircraft
 from models.geometry import RigidBodyGeometry
@@ -142,6 +143,79 @@ def test_picard_step_contains_simultaneous_corner_and_shared_flow() -> None:
         np.testing.assert_allclose(values, np.tile(values[0], (strip_count + 1, 1)))
 
 
+def test_runtime_flow_recentering_contains_the_nonlinear_oracle() -> None:
+    oracle, belief, queue = _setup()
+    generated = oracle.generated
+    cell = generated.cells[0]
+    command_error = generated.bounds.command_error_abs_rad
+    command = Interval(
+        cell.control_anchor - command_error,
+        cell.control_anchor + command_error,
+    )
+    reference = cell.control_anchor
+    certified = generated.bounds.flow
+    global_prediction = FastPredictor(generated).predict(
+        belief,
+        queue,
+        0,
+        local_flow=certified,
+    )
+    remainder = oracle._flow_remainder(
+        global_prediction,
+        0,
+        Interval.point(reference),
+        command,
+        cell,
+    )
+    bounded_cell = replace(
+        cell,
+        stage_remainder_abs=np.nextafter(
+            remainder + _roundoff_bound(cell, belief.interval_hull(), command),
+            np.inf,
+        ),
+    )
+    bounded = replace(generated, cells=(bounded_cell,))
+    predictions = []
+    for center, radius in (
+        (np.array((-0.005, 0.0, 0.0)), np.full(3, 0.001)),
+        (np.array((0.005, 0.0, 0.0)), np.full(3, 0.001)),
+        (np.array((0.01, -0.01, 0.01)), np.zeros(3)),
+        (
+            np.array((-0.0025, 0.00375, -0.00125)),
+            np.array((0.0075, 0.00625, 0.00875)),
+        ),
+    ):
+        local_flow = FlowBounds(
+            center - radius,
+            center + radius,
+            certified.gradient_lower_s,
+            certified.gradient_upper_s,
+            certified.remainder_abs_m_s,
+        )
+        prediction = FastPredictor(bounded).predict(
+            belief,
+            queue,
+            0,
+            local_flow=local_flow,
+        )
+        runtime_oracle = NonlinearOracle(bounded, flow_bounds=local_flow)
+        nonlinear = runtime_oracle._propagate_stage(belief, command, command)
+        local_box = prediction.state_interval(1, reference, reference)
+        assert nonlinear.successor.interval_hull().subset(local_box)
+        predictions.append(prediction)
+
+    first, second = predictions[:2]
+    assert not np.array_equal(first.state_center[1], second.state_center[1])
+    direction = np.array((1.0, 0.0, 0.0))
+    assert (
+        first.air_velocity_support(1, direction)[0]
+        != second.air_velocity_support(
+            1,
+            direction,
+        )[0]
+    )
+
+
 def test_hard_domain_uses_air_relative_velocity() -> None:
     oracle, belief, _ = _setup()
     lower = belief.interval_hull().lower.copy()
@@ -180,6 +254,21 @@ def test_ten_stage_queue_and_remainder_interfaces(
         )
 
     monkeypatch.setattr(oracle, "_propagate_stage", stage)
+
+    def flow_stage(
+        initial: AffineForm,
+        _command: Interval,
+    ) -> tuple[AffineForm, tuple[float, ...]]:
+        midpoint, _ = oracle._append_flow(initial)
+        successor, _ = oracle._append_flow(midpoint)
+        half = 0.5 * FAST_PERIOD_S
+        return successor, (half, half)
+
+    monkeypatch.setattr(
+        oracle,
+        "_flow_affine_stage",
+        flow_stage,
+    )
     queue_radius = np.full_like(queue, 2.0e-3)
     uncertain_queue = tuple(
         Interval.from_midpoint(center, radius)
@@ -220,6 +309,8 @@ def test_ten_stage_queue_and_remainder_interfaces(
     assert remainder.numerical_abs.shape == (PREDICTION_STAGES, 15)
     assert np.all(remainder.nonlinear_abs >= 0.0)
     assert np.all(remainder.numerical_abs > 0.0)
+    assert np.all(np.isfinite(remainder.nonlinear_abs[-1]))
+    assert np.any(remainder.nonlinear_abs[-1] > 0.0)
 
 
 def _landing_prediction(

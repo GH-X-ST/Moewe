@@ -395,6 +395,12 @@ class FastPredictor:
     _history_count: np.ndarray = field(init=False, repr=False)
     _reference_abs: np.ndarray = field(init=False, repr=False)
     _measurement_radius: np.ndarray = field(init=False, repr=False)
+    _compiled_flow_center: np.ndarray = field(init=False, repr=False)
+    _compiled_flow_radius: np.ndarray = field(init=False, repr=False)
+    _flow_center_shift: np.ndarray = field(init=False, repr=False)
+    _flow_center_scale: np.ndarray = field(init=False, repr=False)
+    _flow_center_offset: np.ndarray = field(init=False, repr=False)
+    _flow_recenter_radius: np.ndarray = field(init=False, repr=False)
     _issued_generators: np.ndarray = field(init=False, repr=False)
     _factor_abs: np.ndarray = field(init=False, repr=False)
     _state_vector: np.ndarray = field(init=False, repr=False)
@@ -456,6 +462,35 @@ class FastPredictor:
                 for gain_cell in self.generated.cells
             ]
         )
+        center_flow = Interval(
+            self.generated.bounds.flow.center_lower_m_s,
+            self.generated.bounds.flow.center_upper_m_s,
+        )
+        center_generators = np.stack(
+            [gain_cell.flow_generators[:, :3] for gain_cell in self.generated.cells]
+        )
+        self._compiled_flow_center = center_flow.center
+        self._compiled_flow_radius = center_flow.radius
+        normalization = np.zeros(3)
+        np.divide(
+            np.maximum(np.abs(center_flow.lower), np.abs(center_flow.upper))
+            + np.abs(self._compiled_flow_center),
+            self._compiled_flow_radius,
+            out=normalization,
+            where=self._compiled_flow_radius != 0.0,
+        )
+        recenter_radius = 32.0 * np.finfo(float).eps * np.sum(
+            np.abs(center_generators) * (5.0 + normalization),
+            axis=2,
+        )
+        self._flow_recenter_radius = np.where(
+            recenter_radius == 0.0,
+            0.0,
+            np.nextafter(recenter_radius, np.inf),
+        )
+        self._flow_center_shift = np.empty(3)
+        self._flow_center_scale = np.empty(3)
+        self._flow_center_offset = np.empty(15)
         self._issued_generators = np.empty((3, maximum))
         self._factor_abs = np.empty(maximum)
         self._state_vector = np.empty(15)
@@ -514,6 +549,32 @@ class FastPredictor:
         center_flow = Interval(flow.center_lower_m_s, flow.center_upper_m_s)
         output.flow_center[:] = center_flow.center
         output.flow_radius[:] = center_flow.radius
+        np.subtract(
+            output.flow_center,
+            self._compiled_flow_center,
+            out=self._flow_center_shift,
+        )
+        np.divide(
+            self._flow_center_shift,
+            self._compiled_flow_radius,
+            out=self._flow_center_shift,
+            where=self._compiled_flow_radius != 0.0,
+        )
+        self._flow_center_scale.fill(0.0)
+        np.divide(
+            output.flow_radius,
+            self._compiled_flow_radius,
+            out=self._flow_center_scale,
+            where=self._compiled_flow_radius != 0.0,
+        )
+        center_flow_generators = cell.flow_generators[:, :3]
+        np.matmul(
+            center_flow_generators,
+            self._flow_center_shift,
+            out=self._flow_center_offset,
+        )
+        recenter_radius = self._flow_recenter_radius[cell_index]
+        use_recenter_radius = local_flow is not None
         model_count = cell.model_generators.shape[1]
         model_start = initial_count
         count = initial_count + model_count
@@ -604,7 +665,14 @@ class FastPredictor:
             ] += cell.model_generators
             column = state_count
             flow_count = cell.flow_generators.shape[1]
-            next_generators[:, column : column + flow_count] = cell.flow_generators
+            np.multiply(
+                center_flow_generators,
+                self._flow_center_scale,
+                out=next_generators[:, column : column + 3],
+            )
+            next_generators[:, column + 3 : column + flow_count] = cell.flow_generators[
+                :, 3:
+            ]
             column += flow_count
             for state_index in range(15):
                 for control_index in range(3):
@@ -615,7 +683,11 @@ class FastPredictor:
             column += 3
             next_generators[:, column : column + 15].fill(0.0)
             for index in range(15):
-                next_generators[index, column + index] = cell.stage_remainder_abs[index]
+                remainder = cell.stage_remainder_abs[index]
+                if use_recenter_radius and recenter_radius[index] > 0.0:
+                    remainder += recenter_radius[index]
+                    remainder = np.nextafter(remainder, np.inf)
+                next_generators[index, column + index] = remainder
             column += 15
             next_center = output.state_center[stage + 1]
             np.matmul(cell.state_matrix, state_center, out=next_center)
@@ -626,6 +698,7 @@ class FastPredictor:
             )
             next_center += self._state_vector
             next_center += cell.offset
+            next_center += self._flow_center_offset
             next_reference = output.state_reference[stage + 1]
             np.matmul(cell.state_matrix, state_reference, out=next_reference)
             np.matmul(
