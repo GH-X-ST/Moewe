@@ -18,7 +18,12 @@ from control.oracle import (
     _roundoff_bound,
 )
 from control.predictor import FastPredictor, _generate_aircraft
-from control.uncertainty import Bounds, FAST_PERIOD_S, PREDICTION_STAGES
+from control.uncertainty import (
+    Bounds,
+    COMMAND_ONSET_DELAY_UPPER_S,
+    FAST_PERIOD_S,
+    PREDICTION_STAGES,
+)
 from models.aircraft import Aircraft
 from models.geometry import RigidBodyGeometry
 
@@ -57,7 +62,7 @@ def _bounds() -> Bounds:
         state_estimation_abs=np.array(
             [1.0e-5] * 3 + [1.0e-6] * 3 + [1.0e-4] * 3 + [1.0e-5] * 3 + [1.0e-6] * 3
         ),
-        command_delay_s=(0.0, 0.073),
+        command_delay_s=(0.0, COMMAND_ONSET_DELAY_UPPER_S),
         nonlinear_remainder_abs=np.zeros(15),
         numerical_remainder_abs=np.zeros(15),
         body_inflation_m=1.0e-4,
@@ -226,7 +231,7 @@ def test_hard_domain_uses_air_relative_velocity() -> None:
     assert not oracle._inside_domain(state, Interval.point((1.0, 0.0, 0.0)))
 
 
-def test_ten_stage_queue_and_remainder_interfaces(
+def test_complete_horizon_queue_and_remainder_interfaces(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exercise the complete horizon and uncertain measured command queue."""
@@ -296,8 +301,9 @@ def test_ten_stage_queue_and_remainder_interfaces(
         strict=True,
     ):
         assert point.issued_command.subset(uncertain.issued_command)
-    assert np.max(prediction.stages[5].initial.radius) > np.max(
-        point_prediction.stages[5].initial.radius
+    assert np.any(
+        prediction.stages[-1].initial.radius
+        > point_prediction.stages[-1].initial.radius + 1.0e-12
     )
     remainder = oracle.remainder_bounds(
         belief,

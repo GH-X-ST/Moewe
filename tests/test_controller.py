@@ -29,6 +29,7 @@ from control.predictor import (
 )
 from control.uncertainty import (
     Bounds,
+    COMMAND_ONSET_DELAY_UPPER_S,
     FAST_PERIOD_S,
     NEXT_UPDATE_STAGE,
     PREDICTION_STAGES,
@@ -109,7 +110,7 @@ def generated() -> GeneratedAircraft:
         state_estimation_abs=np.array(
             [1.0e-5] * 3 + [1.0e-6] * 3 + [1.0e-4] * 3 + [1.0e-5] * 3 + [1.0e-6] * 3
         ),
-        command_delay_s=(0.0, 0.073),
+        command_delay_s=(0.0, COMMAND_ONSET_DELAY_UPPER_S),
         nonlinear_remainder_abs=np.array(
             [2.0e-5] * 3 + [2.0e-6] * 3 + [2.0e-4] * 3 + [2.0e-4] * 3 + [2.0e-5] * 3
         ),

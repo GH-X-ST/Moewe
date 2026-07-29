@@ -16,6 +16,7 @@ from control.predictor import (
 )
 from control.uncertainty import (
     Bounds,
+    COMMAND_ONSET_DELAY_UPPER_S,
     FAST_PERIOD_S,
     GOVERNOR_PERIOD_S,
     NEXT_UPDATE_STAGE,
@@ -65,7 +66,7 @@ def _bounds(aircraft: Aircraft) -> Bounds:
         state_estimation_abs=np.array(
             [1.0e-5] * 3 + [1.0e-6] * 3 + [1.0e-4] * 3 + [1.0e-5] * 3 + [1.0e-6] * 3
         ),
-        command_delay_s=(0.0, 0.073),
+        command_delay_s=(0.0, COMMAND_ONSET_DELAY_UPPER_S),
         nonlinear_remainder_abs=np.array(
             [2.0e-5] * 3 + [2.0e-6] * 3 + [2.0e-4] * 3 + [2.0e-4] * 3 + [2.0e-5] * 3
         ),
@@ -110,8 +111,9 @@ def test_nominal_model_dimensions_and_periods() -> None:
     cell = generated.cells[0]
     assert FAST_PERIOD_S == 0.020
     assert GOVERNOR_PERIOD_S == 0.100
-    assert PREDICTION_PERIOD_S == 0.200
-    assert PREDICTION_STAGES == 10
+    assert COMMAND_ONSET_DELAY_UPPER_S == 0.140
+    assert PREDICTION_PERIOD_S == 0.240
+    assert PREDICTION_STAGES == 12
     assert NEXT_UPDATE_STAGE == 5
     assert cell.state_matrix.shape == (15, 15)
     assert cell.control_matrix.shape == (15, 3)
@@ -126,9 +128,10 @@ def test_nominal_model_dimensions_and_periods() -> None:
 
 def test_prediction_horizon_covers_governor_period_and_delay() -> None:
     bounds = _bounds(Aircraft())
-    assert PREDICTION_PERIOD_S >= GOVERNOR_PERIOD_S + bounds.command_delay_s[1]
+    assert bounds.queue_length == 7
+    assert PREDICTION_STAGES >= NEXT_UPDATE_STAGE + bounds.queue_length
     with pytest.raises(ValueError, match="prediction horizon"):
-        replace(bounds, command_delay_s=(0.0, 0.101))
+        replace(bounds, command_delay_s=(0.0, 0.141))
 
 
 def test_analytic_rotation_derivatives_match_central_differences() -> None:
@@ -207,18 +210,21 @@ def test_predictor_is_affine_in_one_three_value_reference() -> None:
     identity = id(first)
     second = predictor.predict(belief, queue, 0)
     assert id(second) == identity
-    assert second.state_center.shape == (11, 15)
-    assert second.state_reference.shape == (11, 15, 3)
+    assert second.state_center.shape == (PREDICTION_STAGES + 1, 15)
+    assert second.state_reference.shape == (PREDICTION_STAGES + 1, 15, 3)
     assert np.all(second.generator_count[1:] > second.generator_count[:-1])
     for stage, count in enumerate(second.generator_count):
         np.testing.assert_allclose(
             second.state_radius[stage],
             np.sum(np.abs(second.state_generators[stage, :, :count]), axis=1),
         )
-    np.testing.assert_array_equal(second.issued_center, np.zeros((10, 3)))
+    np.testing.assert_array_equal(
+        second.issued_center,
+        np.zeros((PREDICTION_STAGES, 3)),
+    )
     np.testing.assert_array_equal(
         second.issued_reference,
-        np.broadcast_to(np.eye(3), (10, 3, 3)),
+        np.broadcast_to(np.eye(3), (PREDICTION_STAGES, 3, 3)),
     )
     for reference in (
         np.zeros(3),
@@ -241,6 +247,9 @@ def test_measured_delay_uses_the_complete_command_queue() -> None:
             (-0.04, 0.02, -0.02),
             (0.05, -0.03, 0.01),
             (0.11, -0.04, -0.03),
+            (0.08, 0.00, -0.01),
+            (-0.07, 0.03, 0.02),
+            (0.02, -0.02, 0.04),
         ]
     )
     queue_radius = np.full(queue.shape, 0.02)
@@ -250,7 +259,7 @@ def test_measured_delay_uses_the_complete_command_queue() -> None:
         0,
         queue_radius,
     )
-    assert bounds.queue_length == 4
+    assert bounds.queue_length == 7
     assert np.all(
         prediction.applied_center[0] - prediction.applied_radius[0]
         <= np.minimum(queue[0], queue[1]) - queue_radius[0]

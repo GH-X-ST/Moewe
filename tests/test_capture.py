@@ -18,6 +18,7 @@ from control.capture import (
 )
 from control.flow import FlowBounds
 from control.missions import CompilationDomain, FreeSpace, Halfspaces
+from control.uncertainty import NEXT_UPDATE_STAGE, PREDICTION_STAGES
 
 
 def _exactly_feasible(
@@ -47,7 +48,7 @@ class _Prediction:
         queue_radius: np.ndarray,
         approaching: bool,
     ) -> None:
-        stages = 11
+        stages = PREDICTION_STAGES + 1
         self.state_center = np.repeat(belief.center[None, :], stages, axis=0)
         self.state_reference = np.zeros((stages, 15, 3))
         count = belief.generators.shape[1] + 3
@@ -59,7 +60,7 @@ class _Prediction:
         self.flow_radius = np.zeros(3)
         direction = -1.0 if approaching else 1.0
         for stage in range(stages):
-            fraction = stage / 5.0
+            fraction = stage / NEXT_UPDATE_STAGE
             self.state_center[stage, 0] += direction * 0.25 * fraction
             self.state_center[stage, :3] += 0.02 * fraction * queue[0]
             self.state_generators[stage, 0, -3] = 0.02 * fraction * queue_radius[0, 0]
@@ -237,7 +238,7 @@ class _Mission:
         del generated, domain
         direction = np.zeros(15)
         direction[0] = 1.0
-        offset, reference = prediction.state_support(10, direction)
+        offset, reference = prediction.state_support(PREDICTION_STAGES, direction)
         return reference.reshape(1, 3), np.array([-offset])
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil
 
 import numpy as np
 import numpy.typing as npt
@@ -13,9 +12,10 @@ from control.flow import FlowBounds
 OBSERVER_PERIOD_S = 0.005
 FAST_PERIOD_S = 0.020
 GOVERNOR_PERIOD_S = 0.100
-PREDICTION_PERIOD_S = 0.200
-PREDICTION_STAGES = 10
-NEXT_UPDATE_STAGE = 5
+COMMAND_ONSET_DELAY_UPPER_S = 0.140
+PREDICTION_PERIOD_S = 0.240
+PREDICTION_STAGES = int(round(PREDICTION_PERIOD_S / FAST_PERIOD_S))
+NEXT_UPDATE_STAGE = int(round(GOVERNOR_PERIOD_S / FAST_PERIOD_S))
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,16 @@ class Bounds:
     body_rate_abs_max_rad_s: float
 
     def __post_init__(self) -> None:
-        if PREDICTION_PERIOD_S < GOVERNOR_PERIOD_S + self.command_delay_s[1]:
+        delay = np.asarray(self.command_delay_s, dtype=float)
+        if (
+            delay.shape != (2,)
+            or not np.all(np.isfinite(delay))
+            or delay[0] < 0.0
+            or delay[1] < delay[0]
+        ):
+            raise ValueError("command_delay_s must be a finite nonnegative interval")
+        object.__setattr__(self, "command_delay_s", (float(delay[0]), float(delay[1])))
+        if PREDICTION_STAGES < NEXT_UPDATE_STAGE + self.queue_length:
             raise ValueError(
                 "prediction horizon must cover the governor period and command delay"
             )
@@ -72,15 +81,18 @@ class Bounds:
     def queue_length(self) -> int:
         """Return the number of issued commands spanning the delay bound."""
 
-        return ceil(self.command_delay_s[1] / FAST_PERIOD_S)
+        ratio = self.command_delay_s[1] / FAST_PERIOD_S
+        # Treat one-ULP error at a fast-step boundary as the exact boundary.
+        return int(np.ceil(np.nextafter(ratio, -np.inf)))
 
     @property
     def delay_step_bounds(self) -> tuple[int, int]:
         """Return inclusive command-age indices at a fast update."""
 
-        lower = int(np.floor(self.command_delay_s[0] / FAST_PERIOD_S))
-        upper = ceil(self.command_delay_s[1] / FAST_PERIOD_S)
-        return lower, upper
+        ratio = self.command_delay_s[0] / FAST_PERIOD_S
+        # Lower bounds round inward at the same exact fast-step boundary.
+        lower = int(np.floor(np.nextafter(ratio, np.inf)))
+        return lower, self.queue_length
 
     @property
     def stage_remainder_abs(self) -> np.ndarray:

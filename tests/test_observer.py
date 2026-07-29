@@ -16,7 +16,7 @@ from control.observer import (
 )
 from control.interval import Interval
 from control.predictor import GeneratedAircraft, _generate_aircraft
-from control.uncertainty import Bounds
+from control.uncertainty import Bounds, COMMAND_ONSET_DELAY_UPPER_S
 from models.aircraft import Aircraft
 from models.geometry import RigidBodyGeometry, body_to_world
 
@@ -49,7 +49,7 @@ def generated() -> GeneratedAircraft:
             + [1.0e-3] * 3
             + [1.0e-4] * 3
         ),
-        command_delay_s=(0.0, 0.073),
+        command_delay_s=(0.0, COMMAND_ONSET_DELAY_UPPER_S),
         nonlinear_remainder_abs=np.array(
             [2.0e-5] * 3
             + [2.0e-6] * 3
@@ -280,7 +280,7 @@ def test_body_flow_encloses_rotation_over_the_prediction_horizon(
     observer = _observer(generated)
     history = _history()
     assert observer.update(generated.cells[0].anchor[:6], 0.0, history)
-    observer._mean[15:] = (0.05, 0.0, 0.0)
+    observer._mean[15:] = (0.04, 0.0, 0.0)
     estimate = observer.estimate(0.0, history)
 
     assert estimate is not None

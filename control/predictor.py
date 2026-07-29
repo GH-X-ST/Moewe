@@ -383,7 +383,7 @@ class Prediction:
 
 @dataclass
 class FastPredictor:
-    """Evaluate one ten-stage affine prediction without runtime allocation."""
+    """Evaluate one fixed-stage affine prediction without runtime allocation."""
 
     generated: _AircraftModel
     max_initial_generators: int = MAX_INITIAL_GENERATORS

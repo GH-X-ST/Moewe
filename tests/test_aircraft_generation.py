@@ -15,7 +15,7 @@ from control.predictor import (
     LQR_STATE_WEIGHT,
     _generate_aircraft,
 )
-from control.uncertainty import Bounds
+from control.uncertainty import Bounds, COMMAND_ONSET_DELAY_UPPER_S
 from models.aircraft import Aircraft, default_aircraft_config
 from models.geometry import RigidBodyGeometry
 
@@ -48,7 +48,7 @@ def _bounds(aircraft: Aircraft) -> Bounds:
         actuator_tau_upper_s=tau,
         command_error_abs_rad=np.full(3, 1.0e-6),
         state_estimation_abs=np.full(15, 1.0e-6),
-        command_delay_s=(0.0, 0.073),
+        command_delay_s=(0.0, COMMAND_ONSET_DELAY_UPPER_S),
         nonlinear_remainder_abs=np.full(15, 1.0e-7),
         numerical_remainder_abs=np.full(15, 1.0e-12),
         body_inflation_m=1.0e-4,

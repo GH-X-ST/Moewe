@@ -20,6 +20,7 @@ from control.missions import (
 )
 from control.flow import FlowBounds
 from control.predictor import Prediction
+from control.uncertainty import PREDICTION_STAGES
 from models.geometry import (
     RigidBodyGeometry,
     point_velocities,
@@ -28,7 +29,7 @@ from models.geometry import (
 from simulation.gate import Gate
 from simulation.platform import Platform
 
-MOEWE_GEOMETRY = RigidBodyGeometry(
+TEST_GEOMETRY = RigidBodyGeometry(
     body_b_m=(
         (0.2705, 0.0, 0.0),
         (-0.3420, 0.0, 0.0),
@@ -117,7 +118,7 @@ def _domain(
 
 
 def _generated(
-    geometry: RigidBodyGeometry = MOEWE_GEOMETRY,
+    geometry: RigidBodyGeometry = TEST_GEOMETRY,
     center_flow_b_m_s: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> SimpleNamespace:
     flow = np.asarray(center_flow_b_m_s, dtype=float)
@@ -247,13 +248,15 @@ def _prediction(
         angle = -float(np.arctan2(mission.normal_w[1], mission.normal_w[0]))
         positions = [
             mission.center_w_m + distance * mission.normal_w
-            for distance in np.linspace(-0.8, 0.8, 11)
+            for distance in np.linspace(-0.8, 0.8, PREDICTION_STAGES + 1)
         ]
         states = np.stack([_state(position, angle) for position in positions])
     else:
         normal = np.cross(mission.length_axis_w, mission.width_axis_w)
         angle = -float(np.arctan2(mission.length_axis_w[1], mission.length_axis_w[0]))
-        heights = np.concatenate((np.linspace(0.25, 0.08, 10), (0.035,)))
+        heights = np.concatenate(
+            (np.linspace(0.25, 0.08, PREDICTION_STAGES), (0.035,))
+        )
         states = np.stack(
             [
                 _state(
@@ -266,7 +269,7 @@ def _prediction(
         )
     prediction.state_center[:] = states
 
-    for stage in range(10):
+    for stage in range(PREDICTION_STAGES):
         midpoint = 0.5 * (states[stage] + states[stage + 1])
         prediction.body_center[stage] = world_points(
             midpoint,
@@ -304,8 +307,8 @@ def _prediction(
 def test_immutable_contract_data_and_mission_scale() -> None:
     """Keep explicit geometry and mission data immutable."""
 
-    assert np.ptp(MOEWE_GEOMETRY.body_b_m[:, 1]) == pytest.approx(0.764)
-    assert np.ptp(MOEWE_GEOMETRY.body_b_m[:, 0]) > 0.6
+    assert np.ptp(TEST_GEOMETRY.body_b_m[:, 1]) == pytest.approx(0.764)
+    assert np.ptp(TEST_GEOMETRY.body_b_m[:, 0]) > 0.6
     mission = _gate_mission()
     domain = _domain(mission)
     terminal = mission.terminal_halfspaces(GENERATED)
@@ -313,7 +316,7 @@ def test_immutable_contract_data_and_mission_scale() -> None:
     assert isinstance(terminal, Halfspaces)
     assert mission.free_space_halfspaces is mission.free_space.halfspaces
     for value in (
-        MOEWE_GEOMETRY.body_b_m,
+        TEST_GEOMETRY.body_b_m,
         domain.lower,
         domain.upper,
         domain.center,
@@ -436,11 +439,11 @@ def test_translated_rotated_landing_first_contact(angle_rad: float) -> None:
 def test_landing_rejects_unapproved_first_contact_and_angular_speed() -> None:
     """Reject earlier body contact and angular contact-point velocity."""
 
-    body = tuple(MOEWE_GEOMETRY.body_b_m) + ((0.0, 0.0, 0.08),)
+    body = tuple(TEST_GEOMETRY.body_b_m) + ((0.0, 0.0, 0.08),)
     unapproved = RigidBodyGeometry(
         body,
-        MOEWE_GEOMETRY.contact_b_m,
-        MOEWE_GEOMETRY.footprint_b_m,
+        TEST_GEOMETRY.contact_b_m,
+        TEST_GEOMETRY.footprint_b_m,
     )
     collision = _landing_mission()
     collision_aircraft = _generated(unapproved)
@@ -495,7 +498,7 @@ def test_landing_monitor_matches_simulator() -> None:
 
 
 def test_terminal_support_rows_are_affine_and_deterministic() -> None:
-    """Return fixed-order physical-reference rows over the ten-stage horizon."""
+    """Return fixed-order physical-reference rows over the complete horizon."""
 
     gate = _gate_mission(angle_rad=radians(17.0))
     gate_prediction = _prediction(gate)
@@ -511,7 +514,10 @@ def test_terminal_support_rows_are_affine_and_deterministic() -> None:
         domain,
     )
     body_count = GENERATED.geometry.body_b_m.shape[0]
-    gate_rows = 42 * body_count + 11 * 8
+    gate_rows = (
+        (2 + 4 * PREDICTION_STAGES) * body_count
+        + (PREDICTION_STAGES + 1) * 8
+    )
     assert first_a.shape == (gate_rows, 3)
     assert first_b.shape == (gate_rows,)
     np.testing.assert_array_equal(first_a, second_a)
@@ -537,7 +543,7 @@ def test_terminal_support_rows_are_affine_and_deterministic() -> None:
     footprint_count = GENERATED.geometry.footprint_b_m.shape[0]
     forbidden_count = body_count - contact_count
     rows = (
-        9 * body_count
+        (PREDICTION_STAGES - 1) * body_count
         + contact_count
         + forbidden_count
         + 4 * footprint_count
@@ -653,7 +659,7 @@ def test_error_and_distance_support_contract() -> None:
     offset, reference = error_support(
         landing,
         prediction,
-        9,
+        PREDICTION_STAGES - 1,
         sink,
         GENERATED,
         _domain(landing),
@@ -688,7 +694,7 @@ def test_landing_error_support_covers_positive_and_negative_velocity_facets() ->
 
     mission = _landing_mission(angle_rad=radians(19.0))
     prediction = _prediction(mission)
-    stage = 9
+    stage = PREDICTION_STAGES - 1
     prediction.state_center[stage, 6:12] = (0.3, -0.2, 0.4, 0.7, -0.5, 0.9)
     prediction.contact_velocity_center[stage] = point_velocities(
         prediction.state_center[stage],
@@ -725,9 +731,11 @@ def test_gate_event_rows_cover_every_horizon_endpoint(
     """Enforce heading, attitude, and speed at every crossing-horizon endpoint."""
 
     mission = _gate_mission()
-    geometry_rows = 42 * GENERATED.geometry.body_b_m.shape[0]
+    geometry_rows = (
+        2 + 4 * PREDICTION_STAGES
+    ) * GENERATED.geometry.body_b_m.shape[0]
     event_rows_per_stage = 8
-    for stage in range(11):
+    for stage in range(PREDICTION_STAGES + 1):
         prediction = _prediction(mission)
         prediction.state_center[stage, coordinate] = value
         _, bounds = mission.terminal_support_constraints(
@@ -739,7 +747,15 @@ def test_gate_event_rows_cover_every_horizon_endpoint(
         assert np.min(bounds[first : first + event_rows_per_stage]) < 0.0
 
 
-@pytest.mark.parametrize(("stage", "coordinate"), ((9, 3), (9, 4), (10, 3), (10, 4)))
+@pytest.mark.parametrize(
+    ("stage", "coordinate"),
+    (
+        (PREDICTION_STAGES - 1, 3),
+        (PREDICTION_STAGES - 1, 4),
+        (PREDICTION_STAGES, 3),
+        (PREDICTION_STAGES, 4),
+    ),
+)
 def test_landing_event_rows_cover_both_segment_endpoints(
     stage: int,
     coordinate: int,
@@ -754,7 +770,7 @@ def test_landing_event_rows_cover_both_segment_endpoints(
         GENERATED,
         _domain(mission),
     )
-    block = 0 if stage == 9 else 1
+    block = 0 if stage == PREDICTION_STAGES - 1 else 1
     first = bounds.size - 20 + 10 * block
     attitude = bounds[first + np.array((3, 4, 8, 9))]
     assert np.min(attitude) < 0.0
@@ -765,7 +781,7 @@ def test_terminal_error_support_is_feasible_for_narrow_predicted_tubes() -> None
 
     cases = (
         (_gate_mission(angle_rad=radians(31.0)), 5),
-        (_landing_mission(angle_rad=radians(-27.0)), 9),
+        (_landing_mission(angle_rad=radians(-27.0)), PREDICTION_STAGES - 1),
     )
     for mission, stage in cases:
         prediction = _prediction(mission)

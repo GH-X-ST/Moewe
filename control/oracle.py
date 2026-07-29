@@ -122,7 +122,7 @@ class OracleStage:
 
 @dataclass(frozen=True)
 class OraclePrediction:
-    """Ten-stage nonlinear enclosure aligned with the fast predictor."""
+    """Fixed-stage nonlinear enclosure aligned with the fast predictor."""
 
     initial: Zonotope
     initial_geometry: GeometryEnclosure
@@ -237,7 +237,7 @@ class NonlinearOracle:
         cell: GainCell,
         reference: npt.ArrayLike | Interval,
     ) -> OraclePrediction:
-        """Validate ten delayed nonlinear stages from predictor stage sets."""
+        """Validate all delayed nonlinear stages from predictor stage sets."""
 
         state = (
             initial
@@ -360,8 +360,6 @@ class NonlinearOracle:
         command: Interval,
         cell: GainCell,
     ) -> np.ndarray:
-        """Bound one stage for every certified center-flow sub-box."""
-
         flow_count = cell.flow_generators.shape[1]
         per_stage = flow_count + 3 + 15
         base = int(prediction.generator_count[0])
@@ -473,8 +471,6 @@ class NonlinearOracle:
         initial: AffineForm,
         command: Interval,
     ) -> tuple[AffineForm, tuple[float, ...]]:
-        """Propagate a stage with fresh flow factors at every oracle step."""
-
         state = initial
         durations = []
         step_s = FAST_PERIOD_S / self.substeps
