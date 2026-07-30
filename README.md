@@ -1,10 +1,10 @@
 <p align="center">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/Project Status-Archived-ffffff?style=for-the-badge&labelColor=0d1117">
-      <source media="(prefers-color-scheme: light)" srcset="https://img.shields.io/badge/Project Status-Archived-000000?style=for-the-badge&labelColor=ffffff">
-      <img src="https://img.shields.io/badge/Read-Thesis-6e7781?style=for-the-badge&labelColor=ffffff" alt="Read thesis">
-    </picture>
-  </a>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/Project Status-Archived-ffffff?style=for-the-badge&labelColor=0d1117">
+    <source media="(prefers-color-scheme: light)" srcset="https://img.shields.io/badge/Project Status-Archived-000000?style=for-the-badge&labelColor=ffffff">
+    <img src="https://img.shields.io/badge/Project Status-Archived-6e7781?style=for-the-badge&labelColor=ffffff" alt="Project status: archived">
+  </picture>
+</p>
 
 <p align="center">
   <sub>Research implementation of the Joint-Flow Capture Governor</sub><br>
@@ -22,33 +22,27 @@
   </picture>
 </p>
 
+## Research Status
+
+Moewe was archived because its intended advantage could not be demonstrated convincingly within the available facility and project window—not because the implementation was empty.
+
+**The arena conflicts with the claimed advantage.** The usable flight length is only 5.4 m: near 6 m/s, a traversal lasts about 0.9 s and permits roughly nine governor updates. A 140 ms command-onset delay consumes about 0.84 m, while the 240 ms prediction horizon spans about 1.44 m. JFCG is intended to make repeated, recursively safe corrections as distance decreases; here, only a few commands can become effective, making a successful run difficult to distinguish from launch stabilisation followed by one terminal correction.
+
+**The novelty is real but limited.** The distinctive contribution is the integration of shared centre-flow and spatial-gradient factors with delayed-command propagation, full-body terminal geometry, a distance-indexed capture cover, and a stored backup reference. Its underlying ingredients—reference governors, zonotopes, reachability, local feedback, and a small online QP—are established methods. Without ablations showing that the joint-flow structure materially enlarges the certified region or improves flight outcomes, the work demonstrates a thoughtful integration rather than a strong state-of-the-art advance.
+
+Development therefore stopped before realistic uncertainty calibration, a nonempty production certificate, comparative baselines, an end-to-end simulation campaign, or hardware validation. The associated draft was not considered ready for T-RO or RA-L. Any guarantee remains conditional on calibrated uncertainty containment, conservative geometry, verified initialization, sound generated prediction, and the runtime timing contract; passing the software tests does not establish flight safety.
+
 ## About
 
 Moewe accompanies the draft manuscript *Joint-Flow Capture Governor for Robust Terminal Control of Unpowered Fixed-Wing Robots*. It investigates the final approach of an unpowered aircraft when recovery distance is limited, commands are delayed, airflow varies across the airframe, and the complete aircraft must safely pass through a gate or make an admissible first landing contact.
 
-The Joint-Flow Capture Governor (JFCG) supervises a nominal controller's aileron, elevator, and rudder references. Expensive reachable-set and terminal-event verification is performed offline. Online, a fixed three-variable quadratic program modifies the proposed references only when required by the stored certificate.
+## Method and Timing
 
-## Method Summary
+JFCG supervises the nominal controller's aileron, elevator, and rudder references:
 
-- A motion-based observer supplies a containing aircraft-state set and centre-flow enclosure from timestamped pose and issued-command history.
-- Centre flow and spatial-gradient uncertainty are shared across all aerodynamic strips; independent strip remainders cover unresolved local variation.
-- An offline nonlinear oracle verifies gain cells, delayed command queues, state-domain validity, swept-airframe geometry, approach progress, and terminal events.
-- A distance-indexed capture cover permits larger terminal error when more correction distance remains and stores a complete-cell backup reference.
-- The runtime affine predictor converts robust constraints into linear inequalities in the three control-surface references.
-- Gate missions check full-airframe aperture passage. Landing missions check first permitted contact, forbidden-body clearance, footprint containment, contact velocity, and touchdown attitude.
-- Invalid estimates, out-of-envelope flow, failed lookup, invalid queues, or failed containment produce no JFCG reference and require a separate flight-stack contingency.
-
-### Timing
-
-| Operation | Period or bound |
-|---|---:|
-| Motion observer | 5 ms |
-| Fast feedback | 20 ms |
-| Reference governor | 100 ms |
-| Maximum command-onset delay | 140 ms |
-| Prediction horizon | 240 ms, 12 fast stages |
-
-The horizon covers one governor period plus the declared command-onset delay. Post-onset actuator motion is represented separately by the actuator states and uncertain actuator time constants.
+- **Before flight:** a nonlinear verifier propagates state, shared centre-flow and gradient uncertainty, local strip remainders, delayed commands, and swept-airframe geometry. It stores a distance-indexed capture cover and a feasible backup reference. The 240 ms horizon uses twelve 20 ms stages, covering one 100 ms governor period plus the maximum 140 ms command-onset delay.
+- **During flight:** the motion-based observer updates its containing state and centre-flow set every 5 ms; nominal feedback runs every 20 ms; and every 100 ms a three-variable QP keeps or minimally adjusts the proposed references using the stored certificate.
+- **At the terminal event:** the complete aircraft must pass through the gate, or the permitted landing points must make first contact while the remaining body, footprint, velocity, and attitude constraints hold. Invalid estimates, queues, flow, lookup, or containment return no JFCG reference and require a separate flight-stack contingency.
 
 ## Repository Guide
 
@@ -99,12 +93,6 @@ Last local result:
 ```
 
 There is no stable command-line interface or bundled production configuration. The tests are the executable construction examples.
-
-## Research Status
-
-Moewe is a substantial software prototype, not a validated flight-control result. The architecture is implemented and software-tested, but work stopped before realistic uncertainty calibration, a nonempty production certificate, comparative ablations, an end-to-end simulation campaign, or hardware validation. The 5.4 m operational corridor also permits only about 0.9 s of flight near 6 m/s—roughly nine governor updates—while command onset may take 140 ms. These limits prevented a convincing demonstration of JFCG's benefit, so the associated draft was not considered ready for T-RO or RA-L.
-
-Any guarantee remains conditional on calibrated uncertainty containment, conservative geometry, verified initialization, sound generated prediction, and the runtime timing contract. Test values are fixtures unless supported by measured evidence; passing the test suite does not establish flight safety. The archive does not claim global safety, route selection, structural-load certification, or post-contact stability.
 
 Related experimental context is available in the [Nausicaa repository](https://github.com/GH-X-ST/Nausicaa) and [public thesis site](https://gh-x-st.github.io/Nausicaa-Thesis/).
 
