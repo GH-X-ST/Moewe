@@ -1,7 +1,18 @@
 <p align="center">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/Project Status-Archived-ffffff?style=for-the-badge&labelColor=0d1117">
+      <source media="(prefers-color-scheme: light)" srcset="https://img.shields.io/badge/Project Status-Archived-000000?style=for-the-badge&labelColor=ffffff">
+      <img src="https://img.shields.io/badge/Read-Thesis-6e7781?style=for-the-badge&labelColor=ffffff" alt="Read thesis">
+    </picture>
+  </a>
+
+<p align="center">
   <sub>Research implementation of the Joint-Flow Capture Governor</sub><br>
-  <sub>Robust terminal control for unpowered fixed-wing robots</sub>
+  <sub>for robust terminal control of unpowered fixed-wing robots</sub>
 </p>
+
+![Cover light](Cover.png#gh-light-mode-only)
+![Cover dark](Cover_dark.png#gh-dark-mode-only)
 
 <p align="center">
   <picture>
@@ -9,11 +20,6 @@
     <source media="(prefers-color-scheme: light)" srcset="https://img.shields.io/badge/Python-3.12-306998?style=for-the-badge&labelColor=ffffff">
     <img src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&labelColor=ffffff" alt="Python 3.12">
   </picture>
-</p>
-
-<p align="center">
-  <strong>Archived research project.</strong><br>
-  <sub>Preserved as a technical prototype; active development and experimental validation are paused.</sub>
 </p>
 
 ## About
