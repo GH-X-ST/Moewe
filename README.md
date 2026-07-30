@@ -22,19 +22,17 @@
   </picture>
 </p>
 
-## Research Status
-
-Moewe was archived because its intended advantage could not be demonstrated convincingly within the available facility and project window—not because the implementation was empty.
-
-**The arena conflicts with the claimed advantage.** The usable flight length is only 5.4 m: near 6 m/s, a traversal lasts about 0.9 s and permits roughly nine governor updates. A 140 ms command-onset delay consumes about 0.84 m, while the 240 ms prediction horizon spans about 1.44 m. JFCG is intended to make repeated, recursively safe corrections as distance decreases; here, only a few commands can become effective, making a successful run difficult to distinguish from launch stabilisation followed by one terminal correction.
-
-**The novelty is real but limited.** The distinctive contribution is the integration of shared centre-flow and spatial-gradient factors with delayed-command propagation, full-body terminal geometry, a distance-indexed capture cover, and a stored backup reference. Its underlying ingredients—reference governors, zonotopes, reachability, local feedback, and a small online QP—are established methods. Without ablations showing that the joint-flow structure materially enlarges the certified region or improves flight outcomes, the work demonstrates a thoughtful integration rather than a strong state-of-the-art advance.
-
-Development therefore stopped before realistic uncertainty calibration, a nonempty production certificate, comparative baselines, an end-to-end simulation campaign, or hardware validation. The associated draft was not considered ready for T-RO or RA-L. Any guarantee remains conditional on calibrated uncertainty containment, conservative geometry, verified initialization, sound generated prediction, and the runtime timing contract; passing the software tests does not establish flight safety.
-
 ## About
 
-Moewe accompanies the draft manuscript *Joint-Flow Capture Governor for Robust Terminal Control of Unpowered Fixed-Wing Robots*. It investigates the final approach of an unpowered aircraft when recovery distance is limited, commands are delayed, airflow varies across the airframe, and the complete aircraft must safely pass through a gate or make an admissible first landing contact.
+Moewe accompanies the draft manuscript *Joint-Flow Capture Governor (JFCG) for Robust Terminal Control of Unpowered Fixed-Wing Robots*. It investigates the final approach of an unpowered aircraft when recovery distance is limited, commands are delayed, airflow varies across the airframe, and the complete aircraft must safely pass through a gate or make an admissible first landing contact.
+
+## Research Status
+
+Moewe was archived because its intended advantage could not be demonstrated convincingly within the available facility.
+
+**The arena conflicts with the claimed advantage.** The usable flight length is only 5.4 m: near 6 m/s, a traversal lasts about 0.9 s and permits roughly nine governor updates. A 140 ms command-onset delay consumes about 0.84 m, while the 240 ms prediction horizon spans about 1.44 m. JFCG is intended to make repeated, recursively safe corrections as distance decreases. However, only a few commands can become effective here, making a successful run difficult to distinguish from launch stabilisation followed by one terminal correction.
+
+**The novelty is limited.** The distinctive contribution is the integration of shared centre-flow and spatial-gradient factors with delayed-command propagation, full-body terminal geometry, a distance-indexed capture cover, and a stored backup reference. Its underlying ingredients—reference governors, zonotopes, reachability, local feedback, and a small online QP—are established methods. Without ablations showing that the joint-flow structure materially enlarges the certified region or improves flight outcomes, the work only demonstrates a thoughtful integration instead of a strong state-of-the-art advance.
 
 ## Method and Timing
 
@@ -79,25 +77,3 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install numpy==2.2.6 scipy==1.16.3 pytest==9.0.3
 ```
-
-Run the tests from the repository root:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-Last local result:
-
-```text
-126 passed, 1056 subtests passed
-```
-
-There is no stable command-line interface or bundled production configuration. The tests are the executable construction examples.
-
-Related experimental context is available in the [Nausicaa repository](https://github.com/GH-X-ST/Nausicaa) and [public thesis site](https://gh-x-st.github.io/Nausicaa-Thesis/).
-
-## Citation and License
-
-The associated manuscript remains a draft, and this software snapshot has no DOI. Until a formal record is available, cite the repository URL, exact Git commit, access date, and manuscript title.
-
-No license file is included. Do not assume that public availability grants permission to copy, modify, redistribute, or use the software operationally.
