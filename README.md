@@ -13,8 +13,7 @@
 
 <p align="center">
   <strong>Archived research project.</strong><br>
-  <sub>Active development is paused. This repository is retained for research traceability and possible future continuation.<br>
-  It is not maintained, flight-ready, or safety-certified.</sub>
+  <sub>Preserved as a technical prototype; active development and experimental validation are paused.</sub>
 </p>
 
 ## About
@@ -95,11 +94,11 @@ Last local result:
 
 There is no stable command-line interface or bundled production configuration. The tests are the executable construction examples.
 
-## Scope
+## Research Status
 
-The guarantees are conditional on calibrated uncertainty containment, conservative physical geometry, verified initialization, sound generated prediction, and satisfaction of the runtime timing contract.
+Moewe is a substantial software prototype, not a validated flight-control result. The architecture is implemented and software-tested, but work stopped before realistic uncertainty calibration, a nonempty production certificate, comparative ablations, an end-to-end simulation campaign, or hardware validation. The 5.4 m operational corridor also permits only about 0.9 s of flight near 6 m/s—roughly nine governor updates—while command onset may take 140 ms. These limits prevented a convincing demonstration of JFCG's benefit, so the associated draft was not considered ready for T-RO or RA-L.
 
-This archive does not provide global safety, route selection, a flow map, structural-load certification, post-contact stability, a frozen production certificate, hardware timing evidence, or a completed experimental evaluation. Numerical geometry and uncertainty values in tests are fixtures unless supported separately by measured evidence. Passing the software tests does not establish flight safety.
+Any guarantee remains conditional on calibrated uncertainty containment, conservative geometry, verified initialization, sound generated prediction, and the runtime timing contract. Test values are fixtures unless supported by measured evidence; passing the test suite does not establish flight safety. The archive does not claim global safety, route selection, structural-load certification, or post-contact stability.
 
 Related experimental context is available in the [Nausicaa repository](https://github.com/GH-X-ST/Nausicaa) and [public thesis site](https://gh-x-st.github.io/Nausicaa-Thesis/).
 
